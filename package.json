@@ -1,0 +1,53 @@
+{
+  "name": "plain-notes",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json --watch",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-fs": "^2.5.1",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-store": "^2.4.3",
+    "@tiptap/core": "^3.27.0",
+    "@tiptap/extension-bullet-list": "^3.27.0",
+    "@tiptap/extension-link": "^3.27.0",
+    "@tiptap/extension-list": "^3.27.0",
+    "@tiptap/pm": "^3.27.0",
+    "@tiptap/extension-list-item": "^3.27.0",
+    "@tiptap/extension-ordered-list": "^3.27.0",
+    "@tiptap/extension-placeholder": "^3.27.0",
+    "@tiptap/extension-task-item": "^3.27.0",
+    "@tiptap/extension-task-list": "^3.27.0",
+    "@tiptap/extension-underline": "^3.27.0",
+    "@tiptap/starter-kit": "^3.27.0",
+    "cmdk": "^1.1.1",
+    "date-fns": "^4.4.0",
+    "fuzzysort": "^3.1.0",
+    "lucide-svelte": "^1.0.1"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.15",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  },
+  "packageManager": "pnpm@10.17.0+sha512.fce8a3dd29a4ed2ec566fb53efbb04d8c44a0f05bc6f24a73046910fb9c3ce7afa35a0980500668fa3573345bd644644fa98338fa168235c80f4aa17aa17fbef"
+}

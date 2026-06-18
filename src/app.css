@@ -1,0 +1,243 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Refined minimal notes app styles - Raycast-like feel */
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Raycast-style design tokens (dark is primary) */
+  --rc-radius: 12px;                  /* MUST match the apply_vibrancy radius in lib.rs */
+  --rc-pad-x: 28px;                   /* generous side padding */
+  --rc-bg: rgba(28, 28, 30, 0.5);     /* translucent tint over the frost; tune 0.35–0.6 */
+  --rc-text: #f5f5f7;
+  --rc-dim: rgba(255, 255, 255, 0.3); /* dimmed centered title + char count */
+
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --rc-bg: rgba(255, 255, 255, 0.6);
+    --rc-text: #1c1c1e;
+    --rc-dim: rgba(0, 0, 0, 0.32);
+  }
+}
+
+html,
+body {
+  margin: 0;
+  overflow: hidden;
+  background: transparent; /* nothing paints a square/opaque backdrop behind the rounded window */
+}
+
+/* Editor container - focus on content */
+.note-window {
+  @apply flex flex-col h-screen;
+  font-family: var(--font-sans);
+  color: var(--rc-text);
+  background: var(--rc-bg);
+  border-radius: var(--rc-radius);
+  overflow: hidden; /* clip title/editor/status to the rounded corners */
+}
+
+/* Minimal centered, draggable title bar (Raycast Notes style) */
+.titlebar {
+  @apply flex items-center justify-center select-none;
+  padding: 12px var(--rc-pad-x);
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.title-dim {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--rc-dim);
+  max-width: 80%;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Minimal centered status bar (character count) */
+.statusbar {
+  @apply flex items-center justify-center select-none;
+  padding: 10px var(--rc-pad-x);
+}
+
+.charcount {
+  font-size: 11px;
+  color: var(--rc-dim);
+}
+
+.editor-container {
+  @apply flex-1 overflow-auto;
+  padding: 12px var(--rc-pad-x) 20px;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+/* Tiptap prose-like minimal */
+.ProseMirror {
+  @apply outline-none min-h-[200px] max-w-none;
+}
+
+.ProseMirror > :first-child { margin-top: 0; }
+
+.ProseMirror p {
+  margin: 0 0 10px;
+}
+
+.ProseMirror h1 { font-size: 22px; font-weight: 700; line-height: 1.3;  margin: 24px 0 8px; letter-spacing: -0.01em; }
+.ProseMirror h2 { font-size: 18px; font-weight: 700; line-height: 1.35; margin: 22px 0 6px; letter-spacing: -0.01em; }
+.ProseMirror h3 { font-size: 16px; font-weight: 600; line-height: 1.4;  margin: 18px 0 4px; }
+
+.ProseMirror ul, .ProseMirror ol {
+  @apply my-1;
+  padding-left: 1.25rem;
+}
+
+/* Visible bullets (preflight removes list styles; .prose not providing them here) */
+.ProseMirror ul:not([data-type="taskList"]) {
+  list-style-type: disc;
+}
+.ProseMirror ol {
+  list-style-type: decimal;
+}
+
+.ProseMirror li {
+  @apply my-0.5;
+}
+
+/* Task lists / checkboxes.
+   Tiptap's TaskItem renders `<li data-checked="...">` — it does NOT add
+   `data-type="taskItem"`, so the layout MUST be keyed off `ul[data-type="taskList"] li`.
+   A flex row keeps the checkbox and its editable content on the SAME line, while the
+   content stays a normal block so the caret lands inside it correctly. */
+.ProseMirror ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+  margin-left: 0;
+}
+
+.ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  margin: 0.125rem 0;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  margin-right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  /* Make the checkbox box exactly one text line tall and center it so it aligns with
+     the first line of the item (stays aligned even when the text wraps). 1.65em matches
+     the editor line-height; 1lh tracks it automatically where supported. */
+  height: 1.65em;
+  height: 1lh;
+  user-select: none;
+}
+
+/* Draw the checkbox entirely with CSS (appearance: none) so it renders IDENTICALLY in
+   Chrome and the Tauri WKWebView. Native checkboxes differ per engine (square vs round,
+   different internal offset), which makes alignment impossible to tune reliably. A pure
+   CSS box has its visual edges == its border box, so `align-items: center` truly centers
+   it on the text. */
+.ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  opacity: 0.5;
+  cursor: pointer;
+  flex: none;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"]:checked {
+  opacity: 1;
+  background-color: #2563eb;
+  border-color: #2563eb;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.6 2.6L12 5.3' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.ProseMirror ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0; /* let long words wrap instead of overflowing the flex row */
+}
+
+.ProseMirror ul[data-type="taskList"] li > div > p {
+  margin: 0;
+  min-height: 1em; /* keep empty items tall enough to click/see the caret */
+}
+
+/* Nested checklists (TaskItem is configured with nested: true) */
+.ProseMirror ul[data-type="taskList"] ul[data-type="taskList"] {
+  width: 100%;
+  margin-left: 1.25rem;
+}
+
+/* Completed items: subtle strikethrough */
+.ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.ProseMirror code {
+  @apply px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[0.9em];
+}
+
+.ProseMirror pre {
+  @apply p-3 rounded bg-black/5 dark:bg-white/10 font-mono text-sm overflow-auto my-2;
+}
+
+.ProseMirror blockquote {
+  @apply border-l-4 border-black/20 dark:border-white/20 pl-3 italic text-black/70 dark:text-white/70 my-2;
+}
+
+.ProseMirror a {
+  @apply text-blue-600 dark:text-blue-400 underline;
+}
+
+/* Floating window polish */
+.floating {
+  box-shadow: 0 10px 30px -15px rgb(0 0 0 / 0.25), 
+              0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .note-window {
+    color-scheme: dark;
+  }
+}
+
+/* Command palette and switcher styles (minimal) */
+.cmdk {
+  @apply bg-white dark:bg-[#1c1c1e] border border-black/10 dark:border-white/10 rounded-xl shadow-xl overflow-hidden;
+}
+
+.cmdk-list {
+  @apply max-h-[320px] overflow-auto py-1;
+}
+
+.cmdk-item {
+  @apply px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2;
+}
+
+.cmdk-item.selected,
+.cmdk-item:hover {
+  @apply bg-black/5 dark:bg-white/10;
+}
