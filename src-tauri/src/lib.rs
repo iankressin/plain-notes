@@ -152,6 +152,12 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Fully quit the application (terminate the process). Bound to ESC in the UI.
+#[command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[command]
 fn get_default_notes_dir() -> String {
     get_notes_dir().to_string_lossy().to_string()
@@ -359,6 +365,7 @@ pub fn run() {
         .manage(SelfWrites::default())
         .invoke_handler(tauri::generate_handler![
             greet,
+            quit_app,
             get_default_notes_dir,
             list_notes,
             read_note,

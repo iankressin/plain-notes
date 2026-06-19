@@ -516,11 +516,10 @@
     // Basic in-app shortcuts (Cmd/Ctrl + key)
     const handleKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      // ESC hides the window (Raycast-style); re-open with Option+N
+      // ESC fully quits the app (terminates the process)
       if (e.key === 'Escape') {
         e.preventDefault();
-        win.hide();
-        isVisible = false;
+        invoke('quit_app');
         return;
       }
       if (mod && e.key.toLowerCase() === 'p') {
