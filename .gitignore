@@ -9,3 +9,6 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Compiled MCP server sidecar binaries (build artifacts; run `bun run compile` in mcp-server/)
+/src-tauri/bin/plain-notes-mcp-*

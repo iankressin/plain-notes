@@ -3,6 +3,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { register, unregister } from '@tauri-apps/plugin-global-shortcut';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
   // Tiptap rich editor for proper markdown rendering + editing
   import { Editor } from '@tiptap/core';
@@ -30,6 +31,12 @@
   let notes = $state<NoteInfo[]>([]);
   let showList = $state(false);
   let isLoadingNote = $state(false);
+  // Live-sync: unsaved edits exist (isDirty), and the open note changed on disk
+  // while we had unsaved edits (externalChangePending → show conflict banner).
+  let isDirty = $state(false);
+  let externalChangePending = $state(false);
+  let connectStatus = $state('');
+  let unlistenNotesChanged: UnlistenFn | null = null;
 
   // Plain-text character count (Raycast-style): strip markdown syntax so we count
   // visible characters, not the `#`, `-`, `[ ]`, `*` tokens.
@@ -421,8 +428,33 @@
     if (!currentPath || !content) return;
     try {
       await invoke('write_note', { path: currentPath, content });
+      isDirty = false;
     } catch (e) {
       console.error('save failed', e);
+    }
+  }
+
+  // Live-sync conflict resolution (shown only when the open note changed on disk
+  // while it had unsaved edits).
+  async function reloadFromDisk() {
+    externalChangePending = false;
+    if (currentPath) {
+      await loadNote(currentPath);
+      isDirty = false;
+    }
+  }
+  async function keepMyVersion() {
+    externalChangePending = false;
+    await saveCurrent(); // overwrite disk with the in-memory version
+  }
+
+  // Register the bundled MCP server with Claude Desktop (writes its config).
+  async function connectToClaude() {
+    connectStatus = 'Connecting…';
+    try {
+      connectStatus = (await invoke('connect_claude_desktop')) as string;
+    } catch (e) {
+      connectStatus = `Failed: ${e}`;
     }
   }
 
@@ -448,6 +480,7 @@
   }
 
   function onContentInput() {
+    isDirty = true;
     // Debounce in real version
     saveCurrent();
   }
@@ -483,6 +516,13 @@
     // Basic in-app shortcuts (Cmd/Ctrl + key)
     const handleKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      // ESC hides the window (Raycast-style); re-open with Option+N
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        win.hide();
+        isVisible = false;
+        return;
+      }
       if (mod && e.key.toLowerCase() === 'p') {
         e.preventDefault();
         toggleBrowser();
@@ -500,6 +540,20 @@
     window.addEventListener('keydown', handleKey);
 
     await win.show();
+
+    // Live-sync: when notes change on disk (e.g. via the bundled MCP server),
+    // refresh the list and reconcile the open note without losing unsaved edits.
+    unlistenNotesChanged = await listen<{ paths: string[] }>('notes-changed', async (event) => {
+      const changed = event.payload?.paths ?? [];
+      await refreshNotes();
+      if (currentPath && !showList && changed.includes(currentPath)) {
+        if (!isDirty) {
+          await loadNote(currentPath); // clean: silently reload from disk
+        } else {
+          externalChangePending = true; // unsaved edits: ask the user
+        }
+      }
+    });
 
     // Bootstrap: load default notes + open/create one
     await refreshNotes();
@@ -522,6 +576,7 @@
   });
 
   onDestroy(async () => {
+    if (unlistenNotesChanged) { unlistenNotesChanged(); unlistenNotesChanged = null; }
     if (editor) {
       if (taskItemClickHandler && editor.view?.dom) {
         editor.view.dom.removeEventListener('click', taskItemClickHandler, { capture: true });
@@ -545,6 +600,10 @@
   <!-- List (Browse) - only shown when active. Editor container is ALWAYS in DOM so bind:this + Tiptap instance survive toggles. -->
   {#if showList}
     <div class="editor-container overflow-auto p-2">
+      <div class="connect-bar">
+        <button class="connect-btn" onclick={connectToClaude}>Connect to Claude</button>
+        {#if connectStatus}<span class="connect-status">{connectStatus}</span>{/if}
+      </div>
       {#each notes as n}
         <button 
           class="w-full text-left px-3 py-1.5 rounded hover:bg-black/5 dark:hover:bg-white/10 mb-0.5 flex justify-between text-sm"
@@ -556,6 +615,14 @@
       {#if notes.length === 0}
         <div class="opacity-50 p-4 text-sm">No notes yet. Create one.</div>
       {/if}
+    </div>
+  {/if}
+
+  {#if externalChangePending && !showList}
+    <div class="external-change-banner">
+      <span>This note changed on disk.</span>
+      <button onclick={reloadFromDisk}>Reload from disk</button>
+      <button onclick={keepMyVersion}>Keep my version</button>
     </div>
   {/if}
 
@@ -572,4 +639,43 @@
 
 <style>
 /* All styles in src/app.css (Tailwind + custom .note-window etc.) */
+.external-change-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: rgba(255, 200, 0, 0.15);
+  border-bottom: 1px solid rgba(255, 200, 0, 0.3);
+}
+.external-change-banner button {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+.external-change-banner button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.connect-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 2px 4px 8px;
+}
+.connect-btn {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+}
+.connect-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+.connect-status {
+  font-size: 11px;
+  opacity: 0.7;
+}
 </style>

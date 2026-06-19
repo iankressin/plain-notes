@@ -1,0 +1,24 @@
+{
+  "name": "plain-notes-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP server shipped with Plain Notes. Lets LLM clients create/read/edit/search markdown notes.",
+  "bin": { "plain-notes-mcp": "src/index.ts" },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "smoke": "bun run test/smoke.mjs",
+    "compile:arm64": "bun build ./src/index.ts --compile --minify --target=bun-darwin-arm64 --outfile ../src-tauri/bin/plain-notes-mcp-aarch64-apple-darwin",
+    "compile:x64": "bun build ./src/index.ts --compile --minify --target=bun-darwin-x64 --outfile ../src-tauri/bin/plain-notes-mcp-x86_64-apple-darwin",
+    "compile": "bun run compile:arm64 && bun run compile:x64"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.6.2"
+  }
+}
