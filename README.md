@@ -16,6 +16,29 @@ pnpm tauri dev
 
 The app creates the notes folder on first launch and works with any plain-text Markdown tools.
 
+## Install (no dev server)
+
+Build and install `Plain Notes.app` to `/Applications`, and register the bundled
+MCP server with Claude Desktop + Claude Code:
+
+```bash
+./scripts/install.sh
+```
+
+Re-run it any time to ship a new build of **both** the UI and the MCP sidecar:
+
+```bash
+./scripts/reinstall.sh          # rebuild from the local checkout, then reinstall
+./scripts/reinstall.sh --pull   # git pull --ff-only first, then rebuild
+```
+
+`reinstall.sh` is just the idempotent installer — the MCP server is registered at
+a stable path (`/Applications/Plain Notes.app/...`), so reinstalling rebuilds,
+replaces, and restarts the clients without re-registration drift.
+
+Flags: `--pull`, `--notes-dir DIR` (default `~/Documents/PlainNotes`),
+`--no-register`, `--no-restart`, `--skip-build`.
+
 ## Current Status (early slices)
 
 - Floating always-on-top window (decorations removed, narrow default)
