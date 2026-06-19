@@ -52,6 +52,17 @@ try {
     JSON.stringify(names),
   );
 
+  // annotations: clients use these to gate calls (auto-approve reads, confirm
+  // destructive ops). Verify they survive the round-trip through a real client.
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t.annotations ?? {}]));
+  check("list_notes is readOnly", byName.list_notes?.readOnlyHint === true);
+  check("read_note is readOnly", byName.read_note?.readOnlyHint === true);
+  check("search_notes is readOnly", byName.search_notes?.readOnlyHint === true);
+  check("delete_note is destructive", byName.delete_note?.destructiveHint === true);
+  check("delete_note is idempotent", byName.delete_note?.idempotentHint === true);
+  check("edit_note is destructive", byName.edit_note?.destructiveHint === true);
+  check("create_note not destructive", byName.create_note?.destructiveHint === false);
+
   // create_note
   const created = await client.callTool({
     name: "create_note",

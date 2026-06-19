@@ -3,9 +3,16 @@ import { z } from "zod";
 import * as store from "./notes-store";
 
 /**
- * Register the five non-destructive note tools. SDK 1.x contract: `inputSchema`
- * is a ZodRawShape (a plain field map, NOT z.object(...)); the handler receives
- * the already-parsed args object.
+ * Register the six note tools. SDK 1.x contract: `inputSchema` is a ZodRawShape
+ * (a plain field map, NOT z.object(...)); the handler receives the already-parsed
+ * args object.
+ *
+ * Every tool also declares MCP `annotations` (readOnlyHint / destructiveHint /
+ * idempotentHint). These are the machine-readable signal clients use to decide
+ * how to gate a call: without them a client must treat each tool as potentially
+ * unsafe and demand interactive approval — which stalls forever for destructive
+ * ops in non-interactive/bridged sessions. `openWorldHint: false` everywhere
+ * because all tools operate solely on the local notes directory.
  */
 export function registerTools(server: McpServer, notesDir: string): void {
   server.registerTool(
@@ -15,6 +22,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
       description:
         "List all notes (id, title, last-modified unix seconds, pinned), sorted pinned-first then newest-first.",
       inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       const notes = await store.listNotes(notesDir);
@@ -31,6 +39,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
       title: "Read note",
       description: "Read the full markdown content of a note by its id (filename without .md).",
       inputSchema: { id: z.string().describe("Note id, e.g. note-1718700000") },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ id }) => {
       try {
@@ -51,6 +60,12 @@ export function registerTools(server: McpServer, notesDir: string): void {
       inputSchema: {
         title: z.string().optional().describe("Optional title; becomes the first '# ' heading."),
         content: z.string().optional().describe("Optional markdown body."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false, // only ever adds a new file; never overwrites
+        idempotentHint: false, // each call creates a distinct note
+        openWorldHint: false,
       },
     },
     async ({ title, content }) => {
@@ -82,6 +97,12 @@ export function registerTools(server: McpServer, notesDir: string): void {
         find: z.string().min(1).optional().describe("Exact substring to find (mode 'str_replace')."),
         replace_with: z.string().optional().describe("Replacement text (mode 'str_replace')."),
       },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true, // 'replace' overwrites existing content
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async (args) => {
       try {
@@ -106,6 +127,12 @@ export function registerTools(server: McpServer, notesDir: string): void {
       description:
         "Permanently delete a note by its id. This cannot be undone (the file is removed from disk).",
       inputSchema: { id: z.string().describe("Note id (filename without .md).") },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true, // removes the file from disk
+        idempotentHint: true, // deleting an already-deleted id leaves the same end state
+        openWorldHint: false,
+      },
     },
     async ({ id }) => {
       try {
@@ -130,6 +157,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
         query: z.string().min(1).describe("Search text."),
         limit: z.number().int().min(1).max(50).default(20).describe("Max results (1-50)."),
       },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ query, limit }) => {
       const results = await store.searchNotes(notesDir, query, limit ?? 20);
