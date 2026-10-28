@@ -21,6 +21,7 @@
     SafeBulletList,
     TaskMarkdownInput,
   } from '$lib/task-editor';
+  import { simpleMarkdownToHtml, htmlToSimpleMarkdown } from '$lib/markdown';
 
   // State
   type NoteInfo = { id: string; path: string; title: string; mtime: number; pinned: boolean };
@@ -56,236 +57,10 @@
   let editor: Editor | null = null;
   let editorElement = $state<HTMLDivElement | null>(null);
 
-  function simpleMarkdownToHtml(md: string): string {
-    if (!md || !md.trim()) return '<p></p>';
-
-    const lines = md.split(/\r?\n/);
-    let html = '';
-    let i = 0;
-    let inTaskList = false;
-    let inBulletList = false;
-    let inOl = false;
-
-    const closeLists = () => {
-      if (inTaskList) { html += '</ul>'; inTaskList = false; }
-      if (inBulletList) { html += '</ul>'; inBulletList = false; }
-      if (inOl) { html += '</ol>'; inOl = false; }
-    };
-
-    const escape = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
-    while (i < lines.length) {
-      let line = lines[i];
-
-      // headings
-      const h3 = line.match(/^###\s+(.*)$/);
-      if (h3) { closeLists(); html += `<h3>${escape(h3[1])}</h3>`; i++; continue; }
-      const h2 = line.match(/^##\s+(.*)$/);
-      if (h2) { closeLists(); html += `<h2>${escape(h2[1])}</h2>`; i++; continue; }
-      const h1 = line.match(/^#\s+(.*)$/);
-      if (h1) { closeLists(); html += `<h1>${escape(h1[1])}</h1>`; i++; continue; }
-
-      // task item: - [ ] or - [x]
-      const task = line.match(/^(\s*)- \[( |x)\]\s+(.*)$/);
-      if (task) {
-        const indent = task[1] || '';
-        const checked = task[2].trim() === 'x';
-        const text = escape(task[3]);
-        const level = Math.floor(indent.length / 2);
-        const pad = '  '.repeat(level);
-        if (!inTaskList) {
-          closeLists();
-          html += `${pad}<ul data-type="taskList">`;
-          inTaskList = true;
-        }
-        // Emit structure that closely matches what Tiptap TaskItem serializes
-        // (label + input + span + content div). This is critical for caret to
-        // land inside the task item and for being able to click back into it.
-        const checkedStr = checked ? 'true' : 'false';
-        const checkedAttr = checked ? ' checked' : '';
-        // Emit as close as possible to Tiptap's own toDOM for reliable parsing on setContent.
-        html += `<li data-type="taskItem" data-checked="${checkedStr}">` +
-                `<label contenteditable="false"><input type="checkbox"${checkedAttr} /></label>` +
-                `<div>${text ? `<p>${text}</p>` : ''}</div></li>`;
-        i++; continue;
-      }
-
-      // bullet - item
-      const bullet = line.match(/^(\s*)- (?!\[)(.*)$/);
-      if (bullet) {
-        const indent = bullet[1] || '';
-        const text = escape(bullet[2]);
-        const level = Math.floor(indent.length / 2);
-        const pad = '  '.repeat(level);
-        if (!inBulletList) {
-          closeLists();
-          html += `${pad}<ul>`;
-          inBulletList = true;
-        }
-        html += `<li><p>${text}</p></li>`;
-        i++; continue;
-      }
-
-      // ordered
-      const ord = line.match(/^(\s*)\d+\.\s+(.*)$/);
-      if (ord) {
-        const text = escape(ord[2]);
-        if (!inOl) {
-          closeLists();
-          html += '<ol>';
-          inOl = true;
-        }
-        html += `<li><p>${text}</p></li>`;
-        i++; continue;
-      }
-
-      // blank line
-      if (!line.trim()) {
-        // Do not close lists on blank lines inside a list. This keeps items that have
-        // blank lines between them (very common in user MD) inside one <ul data-type="taskList">.
-        // Non-list content or a different list type will trigger close via closeLists().
-        if (!inTaskList && !inBulletList && !inOl) {
-          closeLists();
-        }
-        // insert paragraph break marker we will collapse later or just skip extra
-        html += '\n\n';
-        i++; continue;
-      }
-
-      // plain paragraph line (or continuation)
-      closeLists();
-      // collect consecutive non-special lines as one p
-      let para = escape(line);
-      i++;
-      while (i < lines.length) {
-        const next = lines[i];
-        if (!next.trim() || next.match(/^#{1,3}\s/) || next.match(/^(\s*)- /) || next.match(/^(\s*)\d+\. /)) break;
-        para += ' ' + escape(next);
-        i++;
-      }
-      // inline ** * ` for loaded plain md (Tiptap will see rich nodes)
-      para = para.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>').replace(/`(.*?)`/g, '<code>$1</code>');
-      html += `<p>${para}</p>`;
-    }
-
-    closeLists();
-
-    // cleanup: turn blank markers into proper p-breaks but avoid wrapping blocks
-    html = html.replace(/\n\n+/g, '</p><p>');
-    // remove empty p
-    html = html.replace(/<p>\s*<\/p>/g, '');
-    // strip leading/trailing stray p tags
-    html = html.replace(/^<\/?p>/g, '').replace(/<\/?p>$/g, '');
-    // remove </p><p> immediately before/after block tags (headings + lists)
-    html = html.replace(/<\/p><p>\s*(?=<h[1-6]|<ul|<ol)/g, '');
-    html = html.replace(/(<\/h[1-6]>|<\/ul>|<\/ol>)\s*<\/p><p>/g, '$1');
-
-    if (!html.trim()) return '<p></p>';
-    // defensive wrap for any remaining leading loose text
-    html = html.replace(/^(?![<\s])(.+?)(?=<|$)/gm, '<p>$1</p>');
-    return html;
-  }
-
-  function htmlToSimpleMarkdown(html: string): string {
-    if (!html) return '';
-    // Use real DOM parsing for fidelity (prevents tag leakage into .md)
-    const container = document.createElement('div');
-    container.innerHTML = html;
-
-    const lines: string[] = [];
-
-    function walk(node: Node, listType?: 'bullet' | 'task' | 'ol', checked?: boolean) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const t = (node.textContent || '').replace(/\s+/g, ' ').trim();
-        if (t) lines.push(t);
-        return;
-      }
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
-      const el = node as HTMLElement;
-      const tag = el.tagName.toLowerCase();
-
-      if (tag === 'h1') { lines.push('# ' + el.textContent?.trim()); lines.push(''); return; }
-      if (tag === 'h2') { lines.push('## ' + el.textContent?.trim()); lines.push(''); return; }
-      if (tag === 'h3') { lines.push('### ' + el.textContent?.trim()); lines.push(''); return; }
-
-      if (tag === 'strong' || tag === 'b') { /* handled in p context */ }
-      if (tag === 'em' || tag === 'i') { /* handled */ }
-      if (tag === 'code') { /* handled */ }
-
-      if (tag === 'p') {
-        // build inline md for paragraph
-        let txt = '';
-        const processInline = (n: Node): string => {
-          if (n.nodeType === Node.TEXT_NODE) return (n.textContent || '');
-          const e = n as HTMLElement;
-          if (!e) return '';
-          const t = e.tagName ? e.tagName.toLowerCase() : '';
-          const inner = Array.from(e.childNodes).map(processInline).join('');
-          if (t === 'strong' || t === 'b') return '**' + inner + '**';
-          if (t === 'em' || t === 'i') return '*' + inner + '*';
-          if (t === 'code') return '`' + inner + '`';
-          return inner;
-        };
-        txt = Array.from(el.childNodes).map(processInline).join('').replace(/\s+/g, ' ').trim();
-        if (txt) lines.push(txt);
-        lines.push('');
-        return;
-      }
-
-      if (tag === 'ul') {
-        const isTask = el.getAttribute('data-type') === 'taskList';
-        Array.from(el.children).forEach((li) => {
-          if ((li as HTMLElement).tagName.toLowerCase() !== 'li') return;
-          const liEl = li as HTMLElement;
-          const isTaskItem = liEl.getAttribute('data-type') === 'taskItem';
-          const ch = liEl.getAttribute('data-checked') === 'true';
-          // extract text, ignoring the checkbox label UI
-          let itemText = '';
-          const contentEl = liEl.querySelector('div, p') || liEl;
-          itemText = (contentEl.textContent || '').replace(/\s+/g, ' ').trim();
-          if (isTask || isTaskItem) {
-            lines.push(`- [${ch ? 'x' : ' '}] ${itemText}`);
-          } else {
-            lines.push(`- ${itemText}`);
-          }
-        });
-        lines.push('');
-        return;
-      }
-
-      if (tag === 'ol') {
-        let n = 1;
-        Array.from(el.children).forEach((li) => {
-          if ((li as HTMLElement).tagName.toLowerCase() !== 'li') return;
-          const txt = ((li as HTMLElement).textContent || '').replace(/\s+/g, ' ').trim();
-          lines.push(`${n}. ${txt}`);
-          n++;
-        });
-        lines.push('');
-        return;
-      }
-
-      if (tag === 'li') {
-        // fallback if li outside recognized list
-        const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        lines.push(`- ${txt}`);
-        return;
-      }
-
-      if (tag === 'br') { lines.push(''); return; }
-
-      // recurse for other containers
-      Array.from(el.childNodes).forEach((c) => walk(c));
-    }
-
-    Array.from(container.childNodes).forEach((n) => walk(n));
-
-    let md = lines.join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    return md;
-  }
+  // The exact text we last wrote to disk. Used to recognise our own save echoes
+  // coming back through the file watcher so we don't tear the editor down and
+  // re-create it mid-edit (which reset the caret to the top).
+  let lastSavedContent = '';
 
   let taskItemClickHandler: ((event: MouseEvent) => void) | null = null;
 
@@ -387,6 +162,7 @@
     try {
       const text = (await invoke('read_note', { path })) as string;
       content = text;
+      lastSavedContent = text; // disk and memory now agree
       currentPath = path;
       showList = false;
       isLoadingNote = true;
@@ -427,7 +203,9 @@
   async function saveCurrent() {
     if (!currentPath || !content) return;
     try {
-      await invoke('write_note', { path: currentPath, content });
+      const saved = content;
+      await invoke('write_note', { path: currentPath, content: saved });
+      lastSavedContent = saved;
       isDirty = false;
     } catch (e) {
       console.error('save failed', e);
@@ -546,6 +324,18 @@
       const changed = event.payload?.paths ?? [];
       await refreshNotes();
       if (currentPath && !showList && changed.includes(currentPath)) {
+        // Re-read the note and compare against what we already have. If disk
+        // matches our in-memory content (or the last thing we saved), this event
+        // is just the echo of our own write bouncing back through the watcher —
+        // reloading here would destroy and re-create the editor mid-edit, which
+        // resets the caret to the top. Only reconcile on a genuine divergence.
+        let disk: string;
+        try {
+          disk = (await invoke('read_note', { path: currentPath })) as string;
+        } catch {
+          return;
+        }
+        if (disk === content || disk === lastSavedContent) return;
         if (!isDirty) {
           await loadNote(currentPath); // clean: silently reload from disk
         } else {
