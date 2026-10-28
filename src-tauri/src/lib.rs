@@ -400,6 +400,7 @@ async fn write_note(
 
 #[command]
 async fn create_note(
+    title: Option<String>,
     self_writes: tauri::State<'_, SelfWrites>,
     index: tauri::State<'_, NoteIndex>,
 ) -> Result<NoteInfo, String> {
@@ -413,12 +414,16 @@ async fn create_note(
     let filename = format!("note-{}.md", timestamp);
     let path = dir.join(&filename);
 
-    let initial = "# New Note\n\n";
-    fs::write(&path, initial).map_err(|e| e.to_string())?;
+    let title = title
+        .map(|t| t.trim().trim_start_matches('#').trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "New Note".to_string());
+    let initial = format!("# {title}\n\n");
+    fs::write(&path, &initial).map_err(|e| e.to_string())?;
     mark_self_write(&self_writes, &path.to_string_lossy());
 
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
-    index.set(&path.to_string_lossy(), initial, mtime_ms(&meta));
+    index.set(&path.to_string_lossy(), &initial, mtime_ms(&meta));
     index.save();
     let mtime = meta
         .modified()
@@ -432,10 +437,42 @@ async fn create_note(
     Ok(NoteInfo {
         id: filename.trim_end_matches(".md").to_string(),
         path: path.to_string_lossy().to_string(),
-        title: "New Note".to_string(),
+        title,
         mtime,
         pinned: false,
     })
+}
+
+/// True if `path` is a note file directly inside `notes_dir`.
+fn is_note_path(path: &Path, notes_dir: &Path) -> bool {
+    path.parent() == Some(notes_dir) && path.extension().and_then(|e| e.to_str()) == Some("md")
+}
+
+/// Move a note to the Trash, so a mistaken delete can be undone from Finder.
+#[command]
+async fn delete_note(
+    path: String,
+    self_writes: tauri::State<'_, SelfWrites>,
+    index: tauri::State<'_, NoteIndex>,
+) -> Result<(), String> {
+    // The path comes from the webview, so never trash anything but a note.
+    if !is_note_path(Path::new(&path), &get_notes_dir()) {
+        return Err(format!("Not a note: {path}"));
+    }
+    let mut trash = trash::TrashContext::default();
+    // The default macOS method asks Finder over AppleScript, which makes macOS
+    // prompt for permission to control Finder. NSFileManager needs none.
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        trash.set_delete_method(DeleteMethod::NsFileManager);
+    }
+    trash.delete(&path).map_err(|e| e.to_string())?;
+    mark_self_write(&self_writes, &path);
+    if index.refresh(&path) {
+        index.save();
+    }
+    Ok(())
 }
 
 /// Find the bundled MCP server binary. When bundled it sits next to the app
@@ -551,6 +588,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(SelfWrites::default())
         .manage(NoteIndex::load(get_index_path()))
         .invoke_handler(tauri::generate_handler![
@@ -561,6 +599,7 @@ pub fn run() {
             read_note,
             write_note,
             create_note,
+            delete_note,
             connect_claude_desktop
         ])
         .setup(|app| {
@@ -645,6 +684,16 @@ mod tests {
         fs::remove_file(&note).unwrap();
         assert!(index.refresh(&p));
         assert!(index.get(&p).is_none());
+    }
+
+    #[test]
+    fn only_markdown_files_directly_in_the_notes_dir_are_notes() {
+        let dir = Path::new("/notes");
+        assert!(is_note_path(Path::new("/notes/a.md"), dir));
+        assert!(!is_note_path(Path::new("/notes/a.txt"), dir));
+        assert!(!is_note_path(Path::new("/notes/sub/a.md"), dir));
+        assert!(!is_note_path(Path::new("/notes/../a.md"), dir));
+        assert!(!is_note_path(Path::new("/elsewhere/a.md"), dir));
     }
 
     #[test]

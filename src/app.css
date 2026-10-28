@@ -224,20 +224,39 @@ body {
   }
 }
 
-/* Command palette and switcher styles (minimal) */
-.cmdk {
-  @apply bg-white dark:bg-[#1c1c1e] border border-black/10 dark:border-white/10 rounded-xl shadow-xl overflow-hidden;
+/* Command palette (⌘K) */
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
 }
 
-.cmdk-list {
+.palette {
+  @apply bg-white dark:bg-[#1c1c1e] border border-black/10 dark:border-white/10 rounded-xl shadow-xl overflow-hidden;
+  position: fixed;
+  top: 44px;
+  left: 12px;
+  right: 12px;
+  z-index: 50;
+}
+
+.palette-input {
+  @apply w-full bg-transparent px-3 py-2.5 text-sm outline-none border-b border-black/10 dark:border-white/10;
+}
+
+.palette-list {
   @apply max-h-[320px] overflow-auto py-1;
 }
 
-.cmdk-item {
-  @apply px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2;
+.palette-item {
+  @apply w-full px-3 py-1.5 text-sm text-left cursor-pointer flex items-center justify-between gap-2;
 }
 
-.cmdk-item.selected,
-.cmdk-item:hover {
+.palette-item.selected {
   @apply bg-black/5 dark:bg-white/10;
+}
+
+.palette-hint {
+  @apply text-xs shrink-0;
+  color: var(--rc-dim);
 }

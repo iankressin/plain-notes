@@ -156,6 +156,25 @@ export function simpleMarkdownToHtml(md: string): string {
 }
 
 /**
+ * The note as plain text: heading marks, bullets, task boxes and
+ * bold/italic/code marks removed. Line breaks, indentation and list numbers
+ * stay, so the structure still reads once pasted.
+ */
+export function markdownToPlainText(md: string): string {
+  return md
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/^(\s*)#{1,6}\s+/, '$1')
+        .replace(/^(\s*)[-*+]\s+(\[[ xX]\]\s+)?/, '$1')
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/\*(.+?)\*/g, '$1')
+        .replace(/`(.+?)`/g, '$1')
+    )
+    .join('\n');
+}
+
+/**
  * Convert Tiptap's HTML back into stored markdown. Uses real DOM parsing for
  * fidelity (prevents tag leakage into the .md file).
  */

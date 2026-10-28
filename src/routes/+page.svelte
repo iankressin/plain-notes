@@ -21,12 +21,17 @@
     SafeBulletList,
     TaskMarkdownInput,
   } from '$lib/task-editor';
-  import { simpleMarkdownToHtml, htmlToSimpleMarkdown } from '$lib/markdown';
+  import { simpleMarkdownToHtml, htmlToSimpleMarkdown, markdownToPlainText } from '$lib/markdown';
+  import { splitFrontmatter, isPinned, setPinned } from '$lib/frontmatter';
+  import CommandPalette, { type PaletteItem } from '$lib/CommandPalette.svelte';
+  import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
   // State
   type NoteInfo = { id: string; path: string; title: string; mtime: number; pinned: boolean };
 
+  // The open note is `frontmatter + content`; the editor only edits `content`.
   let content = $state('');
+  let frontmatter = $state('');
   let currentPath = $state('');
   let noteTitle = $state('Plain Notes');
   let notes = $state<NoteInfo[]>([]);
@@ -38,6 +43,38 @@
   let externalChangePending = $state(false);
   let connectStatus = $state('');
   let unlistenNotesChanged: UnlistenFn | null = null;
+
+  let showPalette = $state(false);
+  let statusMessage = $state('');
+  // Notes opened this session, most recent first.
+  let recentPaths = $state<string[]>([]);
+
+  let pinned = $derived(isPinned(frontmatter));
+
+  // Recently opened notes first, then the rest in list order (pinned, then
+  // newest). The open note is left out: you're already there.
+  let paletteNotes = $derived.by((): PaletteItem[] => {
+    const recent = recentPaths
+      .map((p) => notes.find((n) => n.path === p))
+      .filter((n): n is NoteInfo => !!n);
+    const rest = notes.filter((n) => !recentPaths.includes(n.path));
+    return [...recent, ...rest]
+      .filter((n) => n.path !== currentPath)
+      .map((n) => ({
+        id: n.path,
+        label: n.title,
+        hint: n.pinned ? 'Pinned' : '',
+        run: () => loadNote(n.path),
+      }));
+  });
+
+  let paletteCommands = $derived<PaletteItem[]>([
+    { id: 'new', label: 'New note', hint: '⌘N', run: () => createNewNote() },
+    { id: 'pin', label: pinned ? 'Unpin note' : 'Pin note', hint: 'Command', run: togglePin },
+    { id: 'copy-md', label: 'Copy as markdown', hint: 'Command', run: () => copyNote('markdown') },
+    { id: 'copy-text', label: 'Copy as plain text', hint: 'Command', run: () => copyNote('text') },
+    { id: 'trash', label: 'Move note to Trash', hint: 'Command', run: trashCurrentNote },
+  ]);
 
   // Plain-text character count (Raycast-style): strip markdown syntax so we count
   // visible characters, not the `#`, `-`, `[ ]`, `*` tokens.
@@ -161,9 +198,12 @@
   async function loadNote(path: string) {
     try {
       const text = (await invoke('read_note', { path })) as string;
-      content = text;
+      const parts = splitFrontmatter(text);
+      frontmatter = parts.frontmatter;
+      content = parts.body;
       lastSavedContent = text; // disk and memory now agree
       currentPath = path;
+      recentPaths = [path, ...recentPaths.filter((p) => p !== path)];
       showList = false;
       isLoadingNote = true;
 
@@ -177,7 +217,7 @@
       }
 
       if (editorElement) {
-        initEditor(text); // always fresh init on current element for reliability
+        initEditor(parts.body); // always fresh init on current element for reliability
         // set explicit content (init already did, but ensure)
         // init used the md->html path already
       } else {
@@ -203,7 +243,7 @@
   async function saveCurrent() {
     if (!currentPath || !content) return;
     try {
-      const saved = content;
+      const saved = frontmatter + content;
       await invoke('write_note', { path: currentPath, content: saved });
       lastSavedContent = saved;
       isDirty = false;
@@ -236,9 +276,9 @@
     }
   }
 
-  async function createNewNote() {
+  async function createNewNote(title?: string) {
     try {
-      const newNote = (await invoke('create_note')) as NoteInfo;
+      const newNote = (await invoke('create_note', { title })) as NoteInfo;
       await refreshNotes();
       isLoadingNote = true;
       await loadNote(newNote.path);
@@ -246,6 +286,57 @@
       console.error(e);
       isLoadingNote = false;
     }
+  }
+
+  async function togglePin() {
+    if (!currentPath) return;
+    frontmatter = setPinned(frontmatter, !pinned);
+    await saveCurrent();
+    await refreshNotes();
+    flash(pinned ? 'Pinned' : 'Unpinned');
+  }
+
+  async function copyNote(format: 'markdown' | 'text') {
+    const text = format === 'markdown' ? content : markdownToPlainText(content);
+    try {
+      await writeText(text);
+      flash(format === 'markdown' ? 'Copied as markdown' : 'Copied as plain text');
+    } catch (e) {
+      console.error('copy failed', e);
+      flash('Copy failed');
+    }
+  }
+
+  async function trashCurrentNote() {
+    const path = currentPath;
+    if (!path) return;
+    currentPath = ''; // stop saves from writing the note back while it's trashed
+    try {
+      await invoke('delete_note', { path });
+    } catch (e) {
+      console.error('trash failed', e);
+      currentPath = path;
+      flash('Could not move note to Trash');
+      return;
+    }
+    recentPaths = recentPaths.filter((p) => p !== path);
+    await refreshNotes();
+    const next = recentPaths.find((p) => notes.some((n) => n.path === p)) ?? notes[0]?.path;
+    if (next) await loadNote(next);
+    else await createNewNote();
+    flash('Moved to Trash');
+  }
+
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  function flash(message: string) {
+    statusMessage = message;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => (statusMessage = ''), 1500);
+  }
+
+  function closePalette() {
+    showPalette = false;
+    try { editor?.commands.focus(); } catch {}
   }
 
   async function refreshNotes() {
@@ -287,10 +378,11 @@
     // Basic in-app shortcuts (Cmd/Ctrl + key)
     const handleKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      // ESC fully quits the app (terminates the process)
+      // ESC closes the palette if open, otherwise fully quits the app
       if (e.key === 'Escape') {
         e.preventDefault();
-        invoke('quit_app');
+        if (showPalette) closePalette();
+        else invoke('quit_app');
         return;
       }
       if (mod && e.key.toLowerCase() === 'p') {
@@ -301,10 +393,10 @@
         e.preventDefault();
         createNewNote();
       }
-      // Cmd/Ctrl + K stub for palette (expand later)
       if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        alert('⌘K palette (to be expanded with cmdk)');
+        if (showPalette) closePalette();
+        else showPalette = true;
       }
     };
     window.addEventListener('keydown', handleKey);
@@ -328,7 +420,7 @@
         } catch {
           return;
         }
-        if (disk === content || disk === lastSavedContent) return;
+        if (disk === frontmatter + content || disk === lastSavedContent) return;
         if (!isDirty) {
           await loadNote(currentPath); // clean: silently reload from disk
         } else {
@@ -422,8 +514,19 @@
   </div>
 
   <div class="statusbar">
-    <span class="charcount">{charCount} {charCount === 1 ? 'character' : 'characters'}</span>
+    <span class="charcount">
+      {statusMessage || `${charCount} ${charCount === 1 ? 'character' : 'characters'}`}
+    </span>
   </div>
+
+  {#if showPalette}
+    <CommandPalette
+      notes={paletteNotes}
+      commands={paletteCommands}
+      onCreate={(title) => createNewNote(title)}
+      onClose={closePalette}
+    />
+  {/if}
 </div>
 
 <style>
