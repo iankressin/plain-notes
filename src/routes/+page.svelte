@@ -6,7 +6,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
   // Tiptap rich editor for proper markdown rendering + editing
-  import { Editor } from '@tiptap/core';
+  import { Editor, type ChainedCommands } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import TaskList from '@tiptap/extension-task-list';
   import TaskItem from '@tiptap/extension-task-item';
@@ -20,6 +20,9 @@
     getTaskItemContentPos,
     SafeBulletList,
     TaskMarkdownInput,
+    clearCheckedTasks,
+    moveCheckedTasksToBottom,
+    uncheckAllTasks,
   } from '$lib/task-editor';
   import { simpleMarkdownToHtml, htmlToSimpleMarkdown, markdownToPlainText } from '$lib/markdown';
   import { splitFrontmatter, isPinned, setPinned } from '$lib/frontmatter';
@@ -68,12 +71,32 @@
       }));
   });
 
+  let hasTasks = $derived(/^\s*- \[[ xX]\]/m.test(content));
+
   let paletteCommands = $derived<PaletteItem[]>([
     { id: 'new', label: 'New note', hint: '⌘N', run: () => createNewNote() },
     { id: 'pin', label: pinned ? 'Unpin note' : 'Pin note', hint: 'Command', run: togglePin },
     { id: 'copy-md', label: 'Copy as markdown', hint: 'Command', run: () => copyNote('markdown') },
     { id: 'copy-text', label: 'Copy as plain text', hint: 'Command', run: () => copyNote('text') },
     { id: 'trash', label: 'Move note to Trash', hint: 'Command', run: trashCurrentNote },
+    ...(hasTasks
+      ? [
+          { id: 'tasks-clear', label: 'Clear checked tasks', hint: 'Command', run: () => taskCommand(clearCheckedTasks) },
+          { id: 'tasks-sink', label: 'Move checked tasks to bottom', hint: 'Command', run: () => taskCommand(moveCheckedTasksToBottom) },
+          { id: 'tasks-uncheck', label: 'Uncheck all tasks', hint: 'Command', run: () => taskCommand(uncheckAllTasks) },
+        ]
+      : []),
+    { id: 'h1', label: 'Heading 1', hint: '⌥⌘1', run: format((c) => c.toggleHeading({ level: 1 })) },
+    { id: 'h2', label: 'Heading 2', hint: '⌥⌘2', run: format((c) => c.toggleHeading({ level: 2 })) },
+    { id: 'h3', label: 'Heading 3', hint: '⌥⌘3', run: format((c) => c.toggleHeading({ level: 3 })) },
+    { id: 'bullets', label: 'Bullet list', hint: '⇧⌘8', run: format((c) => c.toggleBulletList()) },
+    { id: 'numbers', label: 'Numbered list', hint: '⇧⌘7', run: format((c) => c.toggleOrderedList()) },
+    { id: 'task-list', label: 'Task list', hint: '⇧⌘9', run: format((c) => c.toggleTaskList()) },
+    { id: 'link', label: 'Insert link', hint: 'Command', ask: { placeholder: 'Paste a link and press Enter', submit: insertLink } },
+    { id: 'folder', label: 'Open notes folder in Finder', hint: 'Command', run: () => invokeOrFlash('open_notes_folder') },
+    { id: 'reveal', label: 'Reveal note in Finder', hint: 'Command', run: () => invokeOrFlash('reveal_note', { path: currentPath }) },
+    { id: 'claude', label: 'Connect to Claude', hint: 'Command', run: connectToClaude },
+    { id: 'quit', label: 'Quit Plain Notes', hint: 'esc', run: () => invoke('quit_app') },
   ]);
 
   // Plain-text character count (Raycast-style): strip markdown syntax so we count
@@ -274,6 +297,7 @@
     } catch (e) {
       connectStatus = `Failed: ${e}`;
     }
+    flash(connectStatus, 6000);
   }
 
   async function createNewNote(title?: string) {
@@ -328,10 +352,41 @@
   }
 
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
-  function flash(message: string) {
+  function flash(message: string, ms = 1500) {
     statusMessage = message;
     clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => (statusMessage = ''), 1500);
+    flashTimer = setTimeout(() => (statusMessage = ''), ms);
+  }
+
+  function taskCommand(command: (editor: Editor) => boolean) {
+    if (editor && !command(editor)) flash('Nothing to change');
+  }
+
+  function format(apply: (chain: ChainedCommands) => ChainedCommands) {
+    return () => {
+      if (editor) apply(editor.chain().focus()).run();
+    };
+  }
+
+  // Links the selected text, or inserts the link itself when nothing is selected.
+  function insertLink(url: string) {
+    if (!editor) return;
+    const href = /^[a-z][a-z\d+.-]*:/i.test(url) ? url : `https://${url}`;
+    const chain = editor.chain().focus();
+    if (editor.state.selection.empty) {
+      chain.insertContent({ type: 'text', text: url, marks: [{ type: 'link', attrs: { href } }] }).run();
+    } else {
+      chain.extendMarkRange('link').setLink({ href }).run();
+    }
+  }
+
+  async function invokeOrFlash(command: string, args?: Record<string, unknown>) {
+    try {
+      await invoke(command, args);
+    } catch (e) {
+      console.error(command, e);
+      flash(String(e), 4000);
+    }
   }
 
   function closePalette() {

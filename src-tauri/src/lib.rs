@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::command;
 use tauri::{Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
 
 use notify_debouncer_full::new_debouncer;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
@@ -475,6 +476,26 @@ async fn delete_note(
     Ok(())
 }
 
+#[command]
+fn open_notes_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = get_notes_dir();
+    ensure_dir(&dir);
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Show a note selected in a Finder window.
+#[command]
+fn reveal_note(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    if !is_note_path(Path::new(&path), &get_notes_dir()) {
+        return Err(format!("Not a note: {path}"));
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
 /// Find the bundled MCP server binary. When bundled it sits next to the app
 /// executable as `plain-notes-mcp`; in dev it may carry the target-triple suffix.
 fn resolve_mcp_binary() -> Option<PathBuf> {
@@ -600,6 +621,8 @@ pub fn run() {
             write_note,
             create_note,
             delete_note,
+            open_notes_folder,
+            reveal_note,
             connect_claude_desktop
         ])
         .setup(|app| {

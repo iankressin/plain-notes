@@ -34,8 +34,10 @@ export function simpleMarkdownToHtml(md: string): string {
 
   const escape = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Runs on escaped text, so only `"` still needs escaping inside href.
   const inline = (s: string) =>
     s
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, href) => `<a href="${href.replace(/"/g, '&quot;')}">${text}</a>`)
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>')
       .replace(/`(.*?)`/g, '<code>$1</code>');
@@ -108,7 +110,7 @@ export function simpleMarkdownToHtml(md: string): string {
     const task = line.match(/^(\s*)- \[( |x)\]\s+(.*)$/);
     if (task) {
       const level = Math.floor((task[1] || '').length / 2);
-      addListItem(level, 'task', escape(task[3]), task[2].trim() === 'x');
+      addListItem(level, 'task', inline(escape(task[3])), task[2].trim() === 'x');
       i++; continue;
     }
 
@@ -116,7 +118,7 @@ export function simpleMarkdownToHtml(md: string): string {
     const bullet = line.match(/^(\s*)- (?!\[)(.*)$/);
     if (bullet) {
       const level = Math.floor((bullet[1] || '').length / 2);
-      addListItem(level, 'bullet', escape(bullet[2]));
+      addListItem(level, 'bullet', inline(escape(bullet[2])));
       i++; continue;
     }
 
@@ -124,7 +126,7 @@ export function simpleMarkdownToHtml(md: string): string {
     const ord = line.match(/^(\s*)\d+\.\s+(.*)$/);
     if (ord) {
       const level = Math.floor((ord[1] || '').length / 2);
-      addListItem(level, 'ol', escape(ord[2]));
+      addListItem(level, 'ol', inline(escape(ord[2])));
       i++; continue;
     }
 
@@ -157,8 +159,9 @@ export function simpleMarkdownToHtml(md: string): string {
 
 /**
  * The note as plain text: heading marks, bullets, task boxes and
- * bold/italic/code marks removed. Line breaks, indentation and list numbers
- * stay, so the structure still reads once pasted.
+ * bold/italic/code marks removed, and links written as `text (url)`. Line
+ * breaks, indentation and list numbers stay, so the structure still reads
+ * once pasted.
  */
 export function markdownToPlainText(md: string): string {
   return md
@@ -167,6 +170,7 @@ export function markdownToPlainText(md: string): string {
       line
         .replace(/^(\s*)#{1,6}\s+/, '$1')
         .replace(/^(\s*)[-*+]\s+(\[[ xX]\]\s+)?/, '$1')
+        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
         .replace(/\*\*(.+?)\*\*/g, '$1')
         .replace(/\*(.+?)\*/g, '$1')
         .replace(/`(.+?)`/g, '$1')
@@ -195,6 +199,11 @@ export function htmlToSimpleMarkdown(html: string): string {
     if (t === 'strong' || t === 'b') return '**' + inner + '**';
     if (t === 'em' || t === 'i') return '*' + inner + '*';
     if (t === 'code') return '`' + inner + '`';
+    if (t === 'a') {
+      // A bare URL that links to itself stays bare.
+      const href = e.getAttribute('href') ?? '';
+      return href && href !== inner ? `[${inner}](${href})` : inner;
+    }
     return inner;
   };
 

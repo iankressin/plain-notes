@@ -2,14 +2,18 @@
 
 ## Command palette (⌘K)
 
-- Task commands: clear checked tasks, move checked tasks to the bottom, uncheck all.
-- Formatting commands: heading 1–3, bullet, numbered or task list, insert link.
-- App commands: open the notes folder in Finder, reveal this note, Connect to Claude, quit.
 - Search inside notes, not just titles. The title index holds no note text, so either store the text in it, or match titles at once and fill in text matches in the background. Reading a note stored only in iCloud takes about 2 s.
 - Duplicate a note; export a note to a file.
-- Shortcuts for pin, copy and move to Trash. Only "New note" has one (⌘N).
+- Shortcuts for pin, copy and move to Trash.
 - Recent notes reset on relaunch; they last for the session only.
-- The ⌘P list now overlaps with the palette. Fold it in once "Connect to Claude" has a palette command.
+- The ⌘P list now overlaps with the palette, which has "Connect to Claude" too. Fold ⌘P in.
+- With nothing typed, the palette lists up to 24 rows. Group them under headings, or show formatting commands only once you type.
+
+## Editor
+
+- Emptying a note is never saved: `saveCurrent` skips empty content, so after select-all + delete (or "Clear checked tasks" on a note that is only checked tasks) the old text comes back on reopen. The check guards against wiping a note during load, so loosen it with care.
+- Links in headings are lost on save: headings are saved as plain text.
+- Links can't be opened from the editor (`openOnClick` is off). Add ⌘-click.
 
 ## Found along the way
 
