@@ -2,11 +2,57 @@
 //
 // Notes are stored on disk as plain markdown but edited as rich HTML in Tiptap.
 // These two functions are exact inverses for the constructs the editor supports
-// (headings, paragraphs, task/bullet/ordered lists with nesting). Keeping them
-// lossless matters because the app re-hydrates the editor from markdown whenever
-// a note is (re)opened — any asymmetry shows up as corrupted content on reload.
+// (headings, paragraphs, task/bullet/ordered lists with nesting, code blocks,
+// tables). Keeping them lossless matters because the app re-hydrates the editor
+// from markdown whenever a note is (re)opened — any asymmetry shows up as
+// corrupted content on reload. Tables are the one rewrite: their columns are
+// padded to line up on save.
 
 type ListType = 'task' | 'bullet' | 'ol';
+
+/** The fence that opens a code block on this line (``` or ~~~, 3 or more), if any. */
+function fenceOpen(line: string): { marker: string; lang: string } | null {
+  const m = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+  // After a backtick fence, more backticks mean inline code, not a block.
+  if (!m || (m[1][0] === '`' && m[2].includes('`'))) return null;
+  return { marker: m[1], lang: m[2].trim().split(/\s+/)[0] };
+}
+
+function closesFence(line: string, marker: string): boolean {
+  const t = line.trim();
+  return t.length >= marker.length && t === marker[0].repeat(t.length);
+}
+
+// GFM table cells: split on pipes not escaped as `\|`.
+function tableCells(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/(?<!\\)\|$/, '')
+    .split(/(?<!\\)\|/)
+    .map((c) => c.trim());
+}
+
+// The row under a table's header, like `| --- | :-: |`. It must hold a pipe, so
+// a lone `---` stays a horizontal rule.
+function isTableSeparator(line: string): boolean {
+  return line.includes('|') && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line);
+}
+
+function startsTable(lines: string[], i: number): boolean {
+  return (
+    lines[i].includes('|') &&
+    i + 1 < lines.length &&
+    isTableSeparator(lines[i + 1]) &&
+    tableCells(lines[i]).length === tableCells(lines[i + 1]).length
+  );
+}
+
+function columnAlign(separatorCell: string): string | null {
+  const left = separatorCell.startsWith(':');
+  const right = separatorCell.endsWith(':');
+  return left && right ? 'center' : right ? 'right' : left ? 'left' : null;
+}
 
 /**
  * Convert stored markdown into HTML for Tiptap's initial content / setContent.
@@ -99,6 +145,39 @@ export function simpleMarkdownToHtml(md: string): string {
   while (i < lines.length) {
     const line = lines[i];
 
+    // Code block: everything up to the closing fence, kept as written. An
+    // unclosed fence runs to the end of the note.
+    const fence = fenceOpen(line);
+    if (fence) {
+      closeAllLists();
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !closesFence(lines[i], fence.marker)) code.push(lines[i++]);
+      i++;
+      const lang = fence.lang.replace(/[^\w+#.-]/g, '');
+      html += `<pre><code${lang ? ` class="language-${lang}"` : ''}>${escape(code.join('\n'))}</code></pre>`;
+      continue;
+    }
+
+    if (startsTable(lines, i)) {
+      closeAllLists();
+      const header = tableCells(line);
+      const aligns = tableCells(lines[i + 1]).map(columnAlign);
+      const cell = (tag: 'th' | 'td', text: string, col: number) =>
+        `<${tag}${aligns[col] ? ` style="text-align: ${aligns[col]}"` : ''}>` +
+        `<p>${inline(escape(text.replace(/\\\|/g, '|')))}</p></${tag}>`;
+      let rows = `<tr>${header.map((c, col) => cell('th', c, col)).join('')}</tr>`;
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        const cells = tableCells(lines[i]);
+        // As in GFM: extra cells are dropped, missing ones are empty.
+        rows += `<tr>${header.map((_, col) => cell('td', cells[col] ?? '', col)).join('')}</tr>`;
+        i++;
+      }
+      html += `<table><tbody>${rows}</tbody></table>`;
+      continue;
+    }
+
     const h3 = line.match(/^###\s+(.*)$/);
     if (h3) { closeAllLists(); html += `<h3>${escape(h3[1])}</h3>`; i++; continue; }
     const h2 = line.match(/^##\s+(.*)$/);
@@ -144,7 +223,9 @@ export function simpleMarkdownToHtml(md: string): string {
         !next.trim() ||
         next.match(/^#{1,3}\s/) ||
         next.match(/^(\s*)- /) ||
-        next.match(/^(\s*)\d+\.\s/)
+        next.match(/^(\s*)\d+\.\s/) ||
+        fenceOpen(next) ||
+        startsTable(lines, i)
       ) break;
       para += ' ' + escape(next);
       i++;
@@ -157,25 +238,44 @@ export function simpleMarkdownToHtml(md: string): string {
   return html;
 }
 
+const plainInline = (s: string) =>
+  s
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1');
+
 /**
  * The note as plain text: heading marks, bullets, task boxes and
- * bold/italic/code marks removed, and links written as `text (url)`. Line
- * breaks, indentation and list numbers stay, so the structure still reads
- * once pasted.
+ * bold/italic/code marks removed, and links written as `text (url)`. Code
+ * keeps its text as written, without the fences; table rows become
+ * tab-separated cells. Line breaks, indentation and list numbers stay, so the
+ * structure still reads once pasted.
  */
 export function markdownToPlainText(md: string): string {
-  return md
-    .split('\n')
-    .map((line) =>
-      line
-        .replace(/^(\s*)#{1,6}\s+/, '$1')
-        .replace(/^(\s*)[-*+]\s+(\[[ xX]\]\s+)?/, '$1')
-        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
-        .replace(/\*\*(.+?)\*\*/g, '$1')
-        .replace(/\*(.+?)\*/g, '$1')
-        .replace(/`(.+?)`/g, '$1')
-    )
-    .join('\n');
+  const out: string[] = [];
+  let fence: string | null = null; // the marker of the open code block
+  for (const line of md.split('\n')) {
+    if (fence) {
+      if (closesFence(line, fence)) fence = null;
+      else out.push(line);
+      continue;
+    }
+    const open = fenceOpen(line);
+    if (open) {
+      fence = open.marker;
+      continue;
+    }
+    if (isTableSeparator(line)) continue;
+    if (line.trim().startsWith('|')) {
+      out.push(tableCells(line).map((c) => plainInline(c.replace(/\\\|/g, '|'))).join('\t'));
+      continue;
+    }
+    out.push(
+      plainInline(line.replace(/^(\s*)#{1,6}\s+/, '$1').replace(/^(\s*)[-*+]\s+(\[[ xX]\]\s+)?/, '$1'))
+    );
+  }
+  return out.join('\n');
 }
 
 /**
@@ -188,6 +288,8 @@ export function htmlToSimpleMarkdown(html: string): string {
   container.innerHTML = html;
 
   const lines: string[] = [];
+  // Indexes into `lines` that hold code, where blank lines are content.
+  const verbatim = new Set<number>();
 
   // Render inline marks (bold/italic/code) inside a paragraph back to markdown.
   const inlineMd = (n: Node): string => {
@@ -231,6 +333,27 @@ export function htmlToSimpleMarkdown(html: string): string {
     if (tag === 'ul' || tag === 'ol') {
       // Serialize the whole (possibly nested) list, then one trailing blank.
       serializeListItems(el, 0);
+      lines.push('');
+      return;
+    }
+
+    if (tag === 'pre') {
+      const code = el.textContent ?? '';
+      const lang = el.querySelector('code')?.className.match(/language-(\S+)/)?.[1] ?? '';
+      // Longer than any run of backticks in the code, so the code can't close it.
+      const longest = Math.max(0, ...(code.match(/`+/g) ?? []).map((run) => run.length));
+      const fence = '`'.repeat(Math.max(3, longest + 1));
+      lines.push(fence + lang);
+      for (const line of code.split('\n')) {
+        verbatim.add(lines.length);
+        lines.push(line);
+      }
+      lines.push(fence, '');
+      return;
+    }
+
+    if (tag === 'table') {
+      serializeTable(el as HTMLTableElement);
       lines.push('');
       return;
     }
@@ -296,7 +419,43 @@ export function htmlToSimpleMarkdown(html: string): string {
     });
   }
 
+  // GFM table with columns padded to line up. A cell's paragraphs join with a
+  // space; pipes in cell text are escaped.
+  function serializeTable(table: HTMLTableElement) {
+    const rows = Array.from(table.rows).map((tr) =>
+      Array.from(tr.cells).map((cell) =>
+        Array.from(cell.children)
+          .map((block) => Array.from(block.childNodes).map(inlineMd).join(''))
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .replace(/\|/g, '\\|')
+      )
+    );
+    if (!rows.length) return;
+    const aligns = Array.from(table.rows[0].cells).map((cell) => cell.style.textAlign);
+    const cols = Math.max(...rows.map((r) => r.length));
+    const widths = Array.from({ length: cols }, (_, col) =>
+      Math.max(3, ...rows.map((r) => (r[col] ?? '').length))
+    );
+    const row = (cells: string[]) =>
+      '| ' + widths.map((w, col) => (cells[col] ?? '').padEnd(w)).join(' | ') + ' |';
+    const rule = widths.map((w, col) => {
+      if (aligns[col] === 'center') return ':' + '-'.repeat(w - 2) + ':';
+      if (aligns[col] === 'left') return ':' + '-'.repeat(w - 1);
+      if (aligns[col] === 'right') return '-'.repeat(w - 1) + ':';
+      return '-'.repeat(w);
+    });
+    lines.push(row(rows[0]), '| ' + rule.join(' | ') + ' |', ...rows.slice(1).map(row));
+  }
+
   Array.from(container.childNodes).forEach((n) => walk(n));
 
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // Collapse runs of blank lines, except inside code.
+  const out: string[] = [];
+  lines.forEach((line, k) => {
+    if (line === '' && out[out.length - 1] === '' && !verbatim.has(k)) return;
+    out.push(line);
+  });
+  return out.join('\n').trim();
 }

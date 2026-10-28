@@ -12,8 +12,20 @@
 ## Editor
 
 - Emptying a note is never saved: `saveCurrent` skips empty content, so after select-all + delete (or "Clear checked tasks" on a note that is only checked tasks) the old text comes back on reopen. The check guards against wiping a note during load, so loosen it with care.
+- Saving rewrites some markdown (10 of 52 real notes change on a load-and-save round trip, none of it from tables or code blocks):
+  - bold or italic marks next to inline code move, because `*` is matched before code spans are;
+  - blank lines between list items are removed;
+  - numbered lists are renumbered from 1.
 - Links in headings are lost on save: headings are saved as plain text.
 - Links can't be opened from the editor (`openOnClick` is off). Add ⌘-click.
+
+## Tables and diagrams
+
+- Markdown pasted as text isn't converted; a pasted table or ```` ```mermaid ```` block stays plain text. Typing ```` ``` ```` does start a code block.
+- A code block indented inside a list item comes out as a top-level block after the list.
+- Diagrams take the light or dark theme the system has when the first diagram loads; switching themes while the app runs needs a restart.
+- Not tested: moving into a diagram's source with the arrow keys (synthetic key events can't move the caret). Clicking the diagram is tested.
+- mermaid 12 is out; the app uses 11.
 
 ## Found along the way
 

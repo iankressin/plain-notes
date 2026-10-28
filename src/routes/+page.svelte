@@ -26,6 +26,8 @@
   } from '$lib/task-editor';
   import { simpleMarkdownToHtml, htmlToSimpleMarkdown, markdownToPlainText } from '$lib/markdown';
   import { splitFrontmatter, isPinned, setPinned } from '$lib/frontmatter';
+  import { MermaidCodeBlock } from '$lib/code-block';
+  import { TableExtensions } from '$lib/table';
   import CommandPalette, { type PaletteItem } from '$lib/CommandPalette.svelte';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -48,6 +50,8 @@
   let unlistenNotesChanged: UnlistenFn | null = null;
 
   let showPalette = $state(false);
+  // Whether the caret was in a table when the palette opened (shows the table commands).
+  let inTable = $state(false);
   let statusMessage = $state('');
   // Notes opened this session, most recent first.
   let recentPaths = $state<string[]>([]);
@@ -92,7 +96,19 @@
     { id: 'bullets', label: 'Bullet list', hint: '⇧⌘8', run: format((c) => c.toggleBulletList()) },
     { id: 'numbers', label: 'Numbered list', hint: '⇧⌘7', run: format((c) => c.toggleOrderedList()) },
     { id: 'task-list', label: 'Task list', hint: '⇧⌘9', run: format((c) => c.toggleTaskList()) },
+    { id: 'code', label: 'Code block', hint: '⌥⌘C', run: format((c) => c.toggleCodeBlock()) },
     { id: 'link', label: 'Insert link', hint: 'Command', ask: { placeholder: 'Paste a link and press Enter', submit: insertLink } },
+    { id: 'table', label: 'Insert table', hint: 'Command', run: format((c) => c.insertTable({ rows: 3, cols: 3, withHeaderRow: true })) },
+    ...(inTable
+      ? [
+          { id: 'row-add', label: 'Add row below', hint: 'Command', run: format((c) => c.addRowAfter()) },
+          { id: 'col-add', label: 'Add column to the right', hint: 'Command', run: format((c) => c.addColumnAfter()) },
+          { id: 'row-delete', label: 'Delete row', hint: 'Command', run: format((c) => c.deleteRow()) },
+          { id: 'col-delete', label: 'Delete column', hint: 'Command', run: format((c) => c.deleteColumn()) },
+          { id: 'table-delete', label: 'Delete table', hint: 'Command', run: format((c) => c.deleteTable()) },
+        ]
+      : []),
+    { id: 'diagram', label: 'Insert diagram', hint: 'Command', run: insertDiagram },
     { id: 'folder', label: 'Open notes folder in Finder', hint: 'Command', run: () => invokeOrFlash('open_notes_folder') },
     { id: 'reveal', label: 'Reveal note in Finder', hint: 'Command', run: () => invokeOrFlash('reveal_note', { path: currentPath }) },
     { id: 'claude', label: 'Connect to Claude', hint: 'Command', run: connectToClaude },
@@ -141,7 +157,10 @@
           bulletList: false,
           orderedList: false,
           listItem: false,
+          codeBlock: false,
         }),
+        MermaidCodeBlock.configure({ enableTabIndentation: true, tabSize: 2 }),
+        ...TableExtensions,
         TaskMarkdownInput,
         SafeBulletList,
         OrderedList,
@@ -380,6 +399,19 @@
     }
   }
 
+  // A starter flowchart to edit from.
+  function insertDiagram() {
+    editor
+      ?.chain()
+      .focus()
+      .insertContent({
+        type: 'codeBlock',
+        attrs: { language: 'mermaid' },
+        content: [{ type: 'text', text: 'flowchart TD\n  A[Start] --> B[End]' }],
+      })
+      .run();
+  }
+
   async function invokeOrFlash(command: string, args?: Record<string, unknown>) {
     try {
       await invoke(command, args);
@@ -450,8 +482,12 @@
       }
       if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        if (showPalette) closePalette();
-        else showPalette = true;
+        if (showPalette) {
+          closePalette();
+        } else {
+          inTable = !!editor?.isActive('table');
+          showPalette = true;
+        }
       }
     };
     window.addEventListener('keydown', handleKey);
