@@ -284,13 +284,6 @@
   }
 
   onMount(async () => {
-    // Global shortcut
-    try {
-      await register('Option+N', toggleWindow);
-    } catch (e) {
-      try { await register('Alt+N', toggleWindow); } catch {}
-    }
-
     // Basic in-app shortcuts (Cmd/Ctrl + key)
     const handleKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -361,6 +354,13 @@
         if (editor) { try { editor.commands.focus(); } catch {} }
         isLoadingNote = false;
       }, 10);
+    }
+
+    // Global shortcut. Registered last: typing in the open note doesn't need it.
+    try {
+      await register('Option+N', toggleWindow);
+    } catch (e) {
+      try { await register('Alt+N', toggleWindow); } catch {}
     }
   });
 

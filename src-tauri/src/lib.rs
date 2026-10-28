@@ -11,14 +11,14 @@ use tauri::{Emitter, Manager};
 use notify_debouncer_full::new_debouncer;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::DebounceEventResult;
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 #[cfg(target_os = "windows")]
 use window_vibrancy::apply_acrylic;
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NoteInfo {
-    pub id: String,          // filename without .md
+    pub id: String, // filename without .md
     pub path: String,
     pub title: String,
     pub mtime: u64,
@@ -30,12 +30,155 @@ fn get_notes_dir() -> PathBuf {
         dir.join("PlainNotes")
     } else {
         // fallback
-        std::env::current_dir().unwrap_or_default().join("PlainNotes")
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("PlainNotes")
     }
 }
 
 fn ensure_dir(path: &Path) {
     let _ = fs::create_dir_all(path);
+}
+
+fn get_index_path() -> PathBuf {
+    // A cache: losing it only costs one background re-read of every note.
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("plain-notes")
+        .join("notes-index.json")
+}
+
+fn mtime_ms(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+        })
+        .unwrap_or(0)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct IndexEntry {
+    mtime_ms: u64,
+    title: String,
+    pinned: bool,
+}
+
+/// Title and pinned flag of each note, keyed by path and kept outside the
+/// notes folder, so listing notes never reads note bodies. The notes folder
+/// lives in ~/Documents, which iCloud can evict to placeholder files; reading
+/// an evicted note blocks until iCloud downloads it (~2s each).
+struct NoteIndex {
+    file: PathBuf,
+    entries: Mutex<HashMap<String, IndexEntry>>,
+}
+
+impl NoteIndex {
+    fn load(file: PathBuf) -> Self {
+        let entries = fs::read_to_string(&file)
+            .ok()
+            .and_then(|txt| serde_json::from_str(&txt).ok())
+            .unwrap_or_default();
+        NoteIndex {
+            file,
+            entries: Mutex::new(entries),
+        }
+    }
+
+    fn get(&self, path: &str) -> Option<IndexEntry> {
+        self.entries.lock().ok()?.get(path).cloned()
+    }
+
+    /// Record a note whose content is already in hand.
+    fn set(&self, path: &str, content: &str, mtime_ms: u64) {
+        let (title, pinned) = extract_title_and_pinned(content);
+        if let Ok(mut map) = self.entries.lock() {
+            map.insert(
+                path.to_string(),
+                IndexEntry {
+                    mtime_ms,
+                    title,
+                    pinned,
+                },
+            );
+        }
+    }
+
+    /// Re-read `path` only if it changed since it was indexed, and drop it if
+    /// it is gone. Returns true if the index changed. Can block on an iCloud
+    /// download, so keep it off any path the UI waits on.
+    fn refresh(&self, path: &str) -> bool {
+        let Ok(meta) = fs::metadata(path) else {
+            return self
+                .entries
+                .lock()
+                .is_ok_and(|mut map| map.remove(path).is_some());
+        };
+        let mtime = mtime_ms(&meta);
+        if self.get(path).is_some_and(|e| e.mtime_ms == mtime) {
+            return false;
+        }
+        let Ok(content) = fs::read_to_string(path) else {
+            return false;
+        };
+        self.set(path, &content, mtime);
+        true
+    }
+
+    /// Drop entries for notes not in `paths`. Returns true if any were dropped.
+    fn retain(&self, paths: &[String]) -> bool {
+        let Ok(mut map) = self.entries.lock() else {
+            return false;
+        };
+        let before = map.len();
+        map.retain(|p, _| paths.contains(p));
+        map.len() != before
+    }
+
+    fn save(&self) {
+        // Hold the lock across the write so concurrent saves can't interleave.
+        let Ok(map) = self.entries.lock() else { return };
+        let Ok(json) = serde_json::to_string(&*map) else {
+            return;
+        };
+        if let Some(dir) = self.file.parent() {
+            ensure_dir(dir);
+        }
+        let tmp = self.file.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &self.file);
+        }
+    }
+}
+
+/// Bring the index up to date with the notes folder on a background thread.
+/// Notes added or changed while the app was closed get read here, which may
+/// wait on iCloud; the list shows them as "Loading…" until this finishes.
+fn start_indexer(app: tauri::AppHandle, dir: PathBuf) {
+    std::thread::spawn(move || {
+        let paths: Vec<String> = fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let index = app.state::<NoteIndex>();
+        let mut changed = index.retain(&paths);
+        for p in &paths {
+            changed |= index.refresh(p);
+        }
+        if changed {
+            index.save();
+            // Only titles changed, not note content, so no open note needs reloading.
+            let _ = app.emit("notes-changed", NotesChangedPayload { paths: vec![] });
+        }
+    });
 }
 
 /// Payload sent to the frontend when notes change on disk.
@@ -61,10 +204,10 @@ fn mark_self_write(self_writes: &SelfWrites, path: &str) {
 /// Also prunes stale entries opportunistically.
 fn was_self_written(app: &tauri::AppHandle, path: &str) -> bool {
     let state = app.state::<SelfWrites>();
-    let Ok(mut map) = state.0.lock() else { return false };
-    let recent = map
-        .get(path)
-        .is_some_and(|t| t.elapsed() < SELF_WRITE_TTL);
+    let Ok(mut map) = state.0.lock() else {
+        return false;
+    };
+    let recent = map.get(path).is_some_and(|t| t.elapsed() < SELF_WRITE_TTL);
     map.retain(|_, t| t.elapsed() < SELF_WRITE_TTL);
     recent
 }
@@ -99,6 +242,17 @@ fn start_notes_watcher(app: tauri::AppHandle, dir: PathBuf) {
             if !changed.is_empty() {
                 changed.sort();
                 changed.dedup();
+                // These notes were just written by something else, so they are
+                // local and quick to read. refresh skips any whose mtime is
+                // unchanged, so iCloud evicting a note doesn't download it again.
+                let index = app.state::<NoteIndex>();
+                let mut index_changed = false;
+                for p in &changed {
+                    index_changed |= index.refresh(p);
+                }
+                if index_changed {
+                    index.save();
+                }
                 let _ = app.emit("notes-changed", NotesChangedPayload { paths: changed });
             }
         },
@@ -130,7 +284,9 @@ fn extract_title_and_pinned(content: &str) -> (String, bool) {
                 if line.trim().starts_with("pinned:") && line.contains("true") {
                     pinned = true;
                 }
-                if line.trim() == "---" { break; }
+                if line.trim() == "---" {
+                    break;
+                }
             }
         }
     }
@@ -138,7 +294,9 @@ fn extract_title_and_pinned(content: &str) -> (String, bool) {
     // title = first non-empty, non-frontmatter line, strip leading #
     for line in content.lines() {
         let t = line.trim();
-        if t.is_empty() || t == "---" || t.starts_with("pinned:") { continue; }
+        if t.is_empty() || t == "---" || t.starts_with("pinned:") {
+            continue;
+        }
         let title = t.trim_start_matches('#').trim().to_string();
         if !title.is_empty() {
             return (title, pinned);
@@ -164,7 +322,7 @@ fn get_default_notes_dir() -> String {
 }
 
 #[command]
-async fn list_notes() -> Result<Vec<NoteInfo>, String> {
+async fn list_notes(index: tauri::State<'_, NoteIndex>) -> Result<Vec<NoteInfo>, String> {
     let dir = get_notes_dir();
     ensure_dir(&dir);
 
@@ -174,11 +332,23 @@ async fn list_notes() -> Result<Vec<NoteInfo>, String> {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(meta) = fs::metadata(&path) {
-                    let content = fs::read_to_string(&path).unwrap_or_default();
-                    let (title, pinned) = extract_title_and_pinned(&content);
-                    let id = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                    let mtime = meta.modified()
-                        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                    // Index only: reading the body would block on an iCloud
+                    // download for each evicted note.
+                    let (title, pinned) = index
+                        .get(&path.to_string_lossy())
+                        .map_or_else(|| ("Loading…".to_string(), false), |e| (e.title, e.pinned));
+                    let id = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let mtime = meta
+                        .modified()
+                        .map(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                        })
                         .unwrap_or(0);
 
                     notes.push(NoteInfo {
@@ -194,12 +364,10 @@ async fn list_notes() -> Result<Vec<NoteInfo>, String> {
     }
 
     // Sort: pinned first, then reverse chrono (mtime)
-    notes.sort_by(|a, b| {
-        match (a.pinned, b.pinned) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => b.mtime.cmp(&a.mtime),
-        }
+    notes.sort_by(|a, b| match (a.pinned, b.pinned) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => b.mtime.cmp(&a.mtime),
     });
 
     Ok(notes)
@@ -215,18 +383,26 @@ async fn write_note(
     path: String,
     content: String,
     self_writes: tauri::State<'_, SelfWrites>,
+    index: tauri::State<'_, NoteIndex>,
 ) -> Result<(), String> {
     // Ensure parent
     if let Some(parent) = Path::new(&path).parent() {
         ensure_dir(parent);
     }
-    fs::write(&path, content).map_err(|e| e.to_string())?;
+    fs::write(&path, &content).map_err(|e| e.to_string())?;
     mark_self_write(&self_writes, &path);
+    if let Ok(meta) = fs::metadata(&path) {
+        index.set(&path, &content, mtime_ms(&meta));
+        index.save();
+    }
     Ok(())
 }
 
 #[command]
-async fn create_note(self_writes: tauri::State<'_, SelfWrites>) -> Result<NoteInfo, String> {
+async fn create_note(
+    self_writes: tauri::State<'_, SelfWrites>,
+    index: tauri::State<'_, NoteIndex>,
+) -> Result<NoteInfo, String> {
     let dir = get_notes_dir();
     ensure_dir(&dir);
 
@@ -242,8 +418,15 @@ async fn create_note(self_writes: tauri::State<'_, SelfWrites>) -> Result<NoteIn
     mark_self_write(&self_writes, &path.to_string_lossy());
 
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
-    let mtime = meta.modified()
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+    index.set(&path.to_string_lossy(), initial, mtime_ms(&meta));
+    index.save();
+    let mtime = meta
+        .modified()
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        })
         .unwrap_or(0);
 
     Ok(NoteInfo {
@@ -264,7 +447,10 @@ fn resolve_mcp_binary() -> Option<PathBuf> {
     if direct.exists() {
         return Some(direct);
     }
-    let suffixed = dir.join(format!("plain-notes-mcp-{}-apple-darwin", std::env::consts::ARCH));
+    let suffixed = dir.join(format!(
+        "plain-notes-mcp-{}-apple-darwin",
+        std::env::consts::ARCH
+    ));
     if suffixed.exists() {
         return Some(suffixed);
     }
@@ -322,8 +508,8 @@ fn connect_claude_desktop() -> Result<String, String> {
 
     // Read existing config, or start fresh. Never overwrite an unparseable file.
     let root: serde_json::Value = if cfg_path.exists() {
-        let txt =
-            fs::read_to_string(&cfg_path).map_err(|e| format!("Failed to read Claude config: {e}"))?;
+        let txt = fs::read_to_string(&cfg_path)
+            .map_err(|e| format!("Failed to read Claude config: {e}"))?;
         if txt.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -351,7 +537,10 @@ fn connect_claude_desktop() -> Result<String, String> {
     fs::write(&tmp, pretty).map_err(|e| format!("Failed to write config: {e}"))?;
     fs::rename(&tmp, &cfg_path).map_err(|e| format!("Failed to save config: {e}"))?;
 
-    Ok("Connected to Claude Desktop. Fully quit and reopen Claude to load the Plain Notes tools.".to_string())
+    Ok(
+        "Connected to Claude Desktop. Fully quit and reopen Claude to load the Plain Notes tools."
+            .to_string(),
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -363,6 +552,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(SelfWrites::default())
+        .manage(NoteIndex::load(get_index_path()))
         .invoke_handler(tauri::generate_handler![
             greet,
             quit_app,
@@ -378,6 +568,8 @@ pub fn run() {
             let dir = get_notes_dir();
             ensure_dir(&dir);
             println!("[plain-notes] Notes folder: {}", dir.display());
+
+            start_indexer(app.handle().clone(), dir.clone());
 
             // Watch the notes dir so external edits (e.g. from the MCP server)
             // live-update the UI. Runs on the debouncer's own thread.
@@ -411,6 +603,67 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("plain-notes-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir(&dir);
+        dir
+    }
+
+    fn set_mtime(path: &Path, t: std::time::SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn index_rereads_a_note_only_when_its_mtime_changes() {
+        let dir = temp_dir("refresh");
+        let note = dir.join("a.md");
+        let p = note.to_string_lossy().to_string();
+        let index = NoteIndex::load(dir.join("index.json"));
+
+        fs::write(&note, "# First").unwrap();
+        assert!(index.refresh(&p));
+        assert_eq!(index.get(&p).unwrap().title, "First");
+
+        // New content but the same mtime: the cached title stays, so no read happened.
+        let mtime = fs::metadata(&note).unwrap().modified().unwrap();
+        fs::write(&note, "# Second").unwrap();
+        set_mtime(&note, mtime);
+        assert!(!index.refresh(&p));
+        assert_eq!(index.get(&p).unwrap().title, "First");
+
+        set_mtime(&note, mtime + Duration::from_secs(5));
+        assert!(index.refresh(&p));
+        assert_eq!(index.get(&p).unwrap().title, "Second");
+
+        fs::remove_file(&note).unwrap();
+        assert!(index.refresh(&p));
+        assert!(index.get(&p).is_none());
+    }
+
+    #[test]
+    fn index_survives_reload_and_ignores_a_corrupt_file() {
+        let dir = temp_dir("persist");
+        let file = dir.join("cache").join("index.json");
+        let index = NoteIndex::load(file.clone());
+        index.set("/n/a.md", "---\npinned: true\n---\n# Pinned", 7);
+        index.save();
+
+        let entry = NoteIndex::load(file.clone()).get("/n/a.md").unwrap();
+        assert_eq!(
+            (entry.title.as_str(), entry.pinned, entry.mtime_ms),
+            ("Pinned", true, 7)
+        );
+
+        fs::write(&file, "{not json").unwrap();
+        assert!(NoteIndex::load(file).get("/n/a.md").is_none());
+    }
 
     #[test]
     fn upsert_preserves_other_servers_and_keys() {
