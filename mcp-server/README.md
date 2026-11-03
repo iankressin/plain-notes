@@ -13,16 +13,24 @@ frontmatter), so notes created by the LLM and by the app are mutually readable.
 
 | Tool | Purpose |
 |------|---------|
-| `list_notes` | List notes (id, title, mtime, pinned), pinned-first then newest. |
+| `list_notes` | List notes across all folders (id, folder, title, mtime, pinned), pinned-first then newest. |
 | `read_note` | Read a note's markdown by id. |
-| `create_note` | Create a note (optional title/content). Collision-safe filenames. |
+| `create_note` | Create a note (optional title/content/folder). Collision-safe filenames. |
 | `edit_note` | `replace` / `append` / `str_replace` (unique-match) an existing note. |
 | `delete_note` | Permanently delete a note by id (removes the file from disk). |
 | `search_notes` | Case-insensitive title + body search with snippets. |
+| `list_folders` | List all folders, including empty folders, by relative path. |
+| `create_folder` | Create a folder by `name` inside an existing `parent` (defaults to root). |
+| `move_note` | Move a note by `id` into an existing `folder`, returning its new id. |
 
-All access is confined to the notes directory: clients pass a note **id** (never a path),
-and traversal attempts (`..`, absolute paths) are rejected. `delete_note` is permanent —
-MCP clients gate each tool call behind user approval, so the deletion is human-confirmed.
+Note IDs are relative paths without the `.md` extension, for example
+`Work/Project A/note-1718700000`. Existing root IDs remain unchanged. Folder paths
+use `/` separators; an empty string selects the root. Create a destination folder
+before creating or moving notes into it. Moves preserve content and refuse to overwrite
+another note. Use the returned ID for subsequent operations on a moved note.
+
+All operations stay within the notes directory. `delete_note` permanently removes
+the note from disk.
 
 ## Develop & test
 

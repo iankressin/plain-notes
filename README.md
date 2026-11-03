@@ -16,6 +16,35 @@ pnpm tauri dev
 
 The app creates the notes folder on first launch and works with any plain-text Markdown tools.
 
+## Organize notes in folders
+
+Open **Browse notes** or press **Cmd/Ctrl+P**. Use **New folder** to create a
+folder in the current location, then open it to add notes or further subfolders.
+The breadcrumb buttons take you back to a parent folder or the notes root.
+
+New notes, including **Cmd/Ctrl+N**, are created in the selected folder. To move
+an existing note, open it and choose **Move note**, then select its destination.
+Moves preserve the note's contents and refuse to overwrite another file.
+
+**Cmd/Ctrl+K** searches note titles and folder names across the entire collection.
+Folder locations appear beside results. These are ordinary directories containing
+Markdown files, so the same organization is available in Finder and other editors.
+
+## Checks
+
+```sh
+pnpm check
+pnpm build
+cargo test --manifest-path src-tauri/Cargo.toml
+pnpm test:ui
+cd mcp-server
+bun run smoke
+bun run typecheck
+```
+
+The browser tests require Google Chrome and use temporary notes. Run them separately
+from the production build.
+
 ## Install (no dev server)
 
 Build and install `Plain Notes.app` to `/Applications`, and register the bundled

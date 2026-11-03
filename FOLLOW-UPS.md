@@ -11,7 +11,6 @@
 
 ## Editor
 
-- Emptying a note is never saved: `saveCurrent` skips empty content, so after select-all + delete (or "Clear checked tasks" on a note that is only checked tasks) the old text comes back on reopen. The check guards against wiping a note during load, so loosen it with care.
 - Saving rewrites some markdown (10 of 52 real notes change on a load-and-save round trip, none of it from tables or code blocks):
   - bold or italic marks next to inline code move, because `*` is matched before code spans are;
   - blank lines between list items are removed;
@@ -29,7 +28,6 @@
 
 ## Found along the way
 
-- `create_note` names files by the second (`note-<seconds>.md`), so two notes created in the same second overwrite each other.
 - Every keystroke saves the note and rewrites the title index; nothing debounces it.
 - The MCP server deletes notes for good, while the app moves them to the Trash.
 - The MCP server's list and search tools read every note in full, so they are slow when notes are stored only in iCloud.

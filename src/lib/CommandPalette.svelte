@@ -4,6 +4,7 @@
     id: string;
     label: string;
     hint?: string;
+    searchText?: string;
     run?: () => void;
     ask?: { placeholder: string; submit: (value: string) => void };
   };
@@ -39,7 +40,7 @@
     const q = query.trim();
     if (!q) return [...notes.slice(0, RECENT_NOTES), ...commands];
     const matches = fuzzysort
-      .go(q, [...notes, ...commands], { key: 'label', limit: MAX_MATCHES })
+      .go(q, [...notes, ...commands].map((item) => ({ ...item, searchText: item.searchText ?? item.label })), { key: 'searchText', limit: MAX_MATCHES })
       .map((r) => r.obj);
     return [...matches, { id: 'create', label: `Create note “${q}”`, run: () => onCreate(q) }];
   });
@@ -108,7 +109,7 @@
           onclick={() => run(item)}
         >
           <span class="truncate">{item.label}</span>
-          {#if item.hint}<span class="palette-hint">{item.hint}</span>{/if}
+          {#if item.hint}<span class="palette-hint" title={item.hint}>{item.hint}</span>{/if}
         </button>
       {/each}
     </div>

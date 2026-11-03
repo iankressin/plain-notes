@@ -3,7 +3,7 @@ import { z } from "zod";
 import * as store from "./notes-store";
 
 /**
- * Register the six note tools. SDK 1.x contract: `inputSchema` is a ZodRawShape
+ * Register note and folder tools. SDK 1.x contract: `inputSchema` is a ZodRawShape
  * (a plain field map, NOT z.object(...)); the handler receives the already-parsed
  * args object.
  *
@@ -20,7 +20,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
     {
       title: "List notes",
       description:
-        "List all notes (id, title, last-modified unix seconds, pinned), sorted pinned-first then newest-first.",
+        "List all notes across folders (id, folder, title, last-modified unix seconds, pinned), sorted pinned-first then newest-first.",
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -37,8 +37,8 @@ export function registerTools(server: McpServer, notesDir: string): void {
     "read_note",
     {
       title: "Read note",
-      description: "Read the full markdown content of a note by its id (filename without .md).",
-      inputSchema: { id: z.string().describe("Note id, e.g. note-1718700000") },
+      description: "Read the full markdown content of a note by its relative path without .md.",
+      inputSchema: { id: z.string().describe("Note id, e.g. Work/note-1718700000") },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ id }) => {
@@ -60,6 +60,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
       inputSchema: {
         title: z.string().optional().describe("Optional title; becomes the first '# ' heading."),
         content: z.string().optional().describe("Optional markdown body."),
+        folder: z.string().optional().describe("Existing relative folder path, e.g. Work/Project A. Defaults to the root."),
       },
       annotations: {
         readOnlyHint: false,
@@ -68,9 +69,9 @@ export function registerTools(server: McpServer, notesDir: string): void {
         openWorldHint: false,
       },
     },
-    async ({ title, content }) => {
+    async ({ title, content, folder }) => {
       try {
-        const note = await store.createNote(notesDir, { title, content });
+        const note = await store.createNote(notesDir, { title, content, folder });
         return {
           content: [{ type: "text", text: `Created note ${note.id} — ${note.title}` }],
           structuredContent: note,
@@ -91,7 +92,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
       description:
         "Edit an existing note. mode='replace' overwrites the whole file; mode='append' adds to the end; mode='str_replace' replaces an exact, unique substring (fails if 'find' matches zero or multiple times).",
       inputSchema: {
-        id: z.string().describe("Note id (filename without .md)."),
+        id: z.string().describe("Note id (relative path without .md)."),
         mode: z.enum(["replace", "append", "str_replace"]),
         content: z.string().optional().describe("New content for mode 'replace' or 'append'."),
         find: z.string().min(1).optional().describe("Exact substring to find (mode 'str_replace')."),
@@ -126,7 +127,7 @@ export function registerTools(server: McpServer, notesDir: string): void {
       title: "Delete note",
       description:
         "Permanently delete a note by its id. This cannot be undone (the file is removed from disk).",
-      inputSchema: { id: z.string().describe("Note id (filename without .md).") },
+      inputSchema: { id: z.string().describe("Note id (relative path without .md).") },
       annotations: {
         readOnlyHint: false,
         destructiveHint: true, // removes the file from disk
@@ -167,4 +168,51 @@ export function registerTools(server: McpServer, notesDir: string): void {
       return { content: [{ type: "text", text }], structuredContent: { results } };
     },
   );
+
+  server.registerTool("list_folders", {
+    title: "List folders",
+    description: "List all folders, including empty folders, by their relative path. The root is an empty string.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, async () => {
+    const folders = await store.listFolders(notesDir);
+    return {
+      content: [{ type: "text", text: folders.map((folder) => folder.path).join("\n") || "No folders yet." }],
+      structuredContent: { folders },
+    };
+  });
+
+  server.registerTool("create_folder", {
+    title: "Create folder",
+    description: "Create one folder inside an existing parent folder. Use this to group notes by domain.",
+    inputSchema: {
+      parent: z.string().default("").describe("Parent folder path relative to the notes root."),
+      name: z.string().min(1).describe("Folder name, without slashes."),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  }, async ({ parent, name }) => {
+    try {
+      const folder = await store.createFolder(notesDir, parent, name);
+      return { content: [{ type: "text", text: `Created folder ${folder.path}` }], structuredContent: folder };
+    } catch (error) {
+      return { content: [{ type: "text", text: `Could not create folder: ${String(error)}` }], isError: true };
+    }
+  });
+
+  server.registerTool("move_note", {
+    title: "Move note to folder",
+    description: "Move a note to an existing folder without overwriting another note. Returns its new id.",
+    inputSchema: {
+      id: z.string().describe("Note id (relative path without .md)."),
+      folder: z.string().describe("Destination relative folder path; use an empty string for the root."),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  }, async ({ id, folder }) => {
+    try {
+      const note = await store.moveNote(notesDir, id, folder);
+      return { content: [{ type: "text", text: `Moved note to ${note.id}` }], structuredContent: note };
+    } catch (error) {
+      return { content: [{ type: "text", text: `Could not move note: ${String(error)}` }], isError: true };
+    }
+  });
 }

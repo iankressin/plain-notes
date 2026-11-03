@@ -1,4 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod note_files;
+
+use note_files::{is_note_path, FolderInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -19,8 +22,9 @@ use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectStat
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NoteInfo {
-    pub id: String, // filename without .md
+    pub id: String,
     pub path: String,
+    pub folder: String,
     pub title: String,
     pub mtime: u64,
     pub pinned: bool,
@@ -158,16 +162,14 @@ impl NoteIndex {
 /// wait on iCloud; the list shows them as "Loading…" until this finishes.
 fn start_indexer(app: tauri::AppHandle, dir: PathBuf) {
     std::thread::spawn(move || {
-        let paths: Vec<String> = fs::read_dir(&dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let Ok(tree) = note_files::scan(&dir) else {
+            return;
+        };
+        let paths: Vec<String> = tree
+            .notes
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
 
         let index = app.state::<NoteIndex>();
         let mut changed = index.retain(&paths);
@@ -216,12 +218,14 @@ fn was_self_written(app: &tauri::AppHandle, path: &str) -> bool {
 /// Watch the notes directory and emit `notes-changed` to the frontend when
 /// `.md` files are created/modified/removed by anything other than the app itself.
 fn start_notes_watcher(app: tauri::AppHandle, dir: PathBuf) {
+    let watched_dir = dir.clone();
     let watcher = new_debouncer(
         Duration::from_millis(300),
         None,
         move |result: DebounceEventResult| {
             let Ok(events) = result else { return };
             let mut changed: Vec<String> = Vec::new();
+            let mut folders_changed = false;
             for ev in &events {
                 if !matches!(
                     ev.kind,
@@ -230,7 +234,8 @@ fn start_notes_watcher(app: tauri::AppHandle, dir: PathBuf) {
                     continue;
                 }
                 for p in &ev.paths {
-                    if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                    if !is_note_path(p, &watched_dir) || p.is_dir() {
+                        folders_changed = true;
                         continue;
                     }
                     let ps = p.to_string_lossy().to_string();
@@ -249,19 +254,27 @@ fn start_notes_watcher(app: tauri::AppHandle, dir: PathBuf) {
                 let index = app.state::<NoteIndex>();
                 let mut index_changed = false;
                 for p in &changed {
-                    index_changed |= index.refresh(p);
+                    if !Path::new(p).exists()
+                        || note_files::checked_note(&watched_dir, Path::new(p)).is_ok()
+                    {
+                        index_changed |= index.refresh(p);
+                    }
                 }
                 if index_changed {
                     index.save();
                 }
                 let _ = app.emit("notes-changed", NotesChangedPayload { paths: changed });
             }
+            if folders_changed {
+                start_indexer(app.clone(), watched_dir.clone());
+                let _ = app.emit("notes-changed", NotesChangedPayload { paths: vec![] });
+            }
         },
     );
 
     match watcher {
         Ok(mut debouncer) => {
-            if let Err(e) = debouncer.watch(&dir, RecursiveMode::NonRecursive) {
+            if let Err(e) = debouncer.watch(&dir, RecursiveMode::Recursive) {
                 eprintln!("[plain-notes] failed to watch notes dir: {e:?}");
                 return;
             }
@@ -325,44 +338,12 @@ fn get_default_notes_dir() -> String {
 #[command]
 async fn list_notes(index: tauri::State<'_, NoteIndex>) -> Result<Vec<NoteInfo>, String> {
     let dir = get_notes_dir();
-    ensure_dir(&dir);
-
-    let mut notes = vec![];
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                if let Ok(meta) = fs::metadata(&path) {
-                    // Index only: reading the body would block on an iCloud
-                    // download for each evicted note.
-                    let (title, pinned) = index
-                        .get(&path.to_string_lossy())
-                        .map_or_else(|| ("Loading…".to_string(), false), |e| (e.title, e.pinned));
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let mtime = meta
-                        .modified()
-                        .map(|t| {
-                            t.duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs()
-                        })
-                        .unwrap_or(0);
-
-                    notes.push(NoteInfo {
-                        id,
-                        path: path.to_string_lossy().to_string(),
-                        title,
-                        mtime,
-                        pinned,
-                    });
-                }
-            }
-        }
-    }
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut notes = note_files::scan(&dir)?
+        .notes
+        .iter()
+        .map(|path| note_info(&dir, path, &index))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Sort: pinned first, then reverse chrono (mtime)
     notes.sort_by(|a, b| match (a.pinned, b.pinned) {
@@ -374,9 +355,56 @@ async fn list_notes(index: tauri::State<'_, NoteIndex>) -> Result<Vec<NoteInfo>,
     Ok(notes)
 }
 
+fn note_info(dir: &Path, path: &Path, index: &NoteIndex) -> Result<NoteInfo, String> {
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let (title, pinned) = index.get(&path.to_string_lossy()).map_or_else(
+        || ("Loading…".into(), false),
+        |entry| (entry.title, entry.pinned),
+    );
+    let relative = note_files::relative_path(dir, path);
+    Ok(NoteInfo {
+        id: relative.strip_suffix(".md").unwrap_or(&relative).into(),
+        path: path.to_string_lossy().into_owned(),
+        folder: note_files::relative_path(dir, path.parent().unwrap()),
+        title,
+        mtime: mtime_ms(&meta) / 1000,
+        pinned,
+    })
+}
+
+#[command]
+async fn list_folders() -> Result<Vec<FolderInfo>, String> {
+    let dir = get_notes_dir();
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(note_files::scan(&dir)?.folders)
+}
+
+#[command]
+async fn create_folder(parent: String, name: String) -> Result<FolderInfo, String> {
+    note_files::create_folder(&get_notes_dir(), &parent, &name)
+}
+
+#[command]
+async fn move_note(
+    path: String,
+    folder: String,
+    self_writes: tauri::State<'_, SelfWrites>,
+    index: tauri::State<'_, NoteIndex>,
+) -> Result<NoteInfo, String> {
+    let dir = get_notes_dir();
+    let target = note_files::move_note(&dir, Path::new(&path), &folder)?;
+    mark_self_write(&self_writes, &path);
+    mark_self_write(&self_writes, &target.to_string_lossy());
+    index.refresh(&path);
+    index.refresh(&target.to_string_lossy());
+    index.save();
+    note_info(&dir, &target, &index)
+}
+
 #[command]
 async fn read_note(path: String) -> Result<String, String> {
-    fs::read_to_string(&path).map_err(|e| e.to_string())
+    let path = note_files::checked_note(&get_notes_dir(), Path::new(&path))?;
+    fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
 #[command]
@@ -386,10 +414,7 @@ async fn write_note(
     self_writes: tauri::State<'_, SelfWrites>,
     index: tauri::State<'_, NoteIndex>,
 ) -> Result<(), String> {
-    // Ensure parent
-    if let Some(parent) = Path::new(&path).parent() {
-        ensure_dir(parent);
-    }
+    note_files::checked_note(&get_notes_dir(), Path::new(&path))?;
     fs::write(&path, &content).map_err(|e| e.to_string())?;
     mark_self_write(&self_writes, &path);
     if let Ok(meta) = fs::metadata(&path) {
@@ -402,51 +427,25 @@ async fn write_note(
 #[command]
 async fn create_note(
     title: Option<String>,
+    folder: Option<String>,
     self_writes: tauri::State<'_, SelfWrites>,
     index: tauri::State<'_, NoteIndex>,
 ) -> Result<NoteInfo, String> {
     let dir = get_notes_dir();
-    ensure_dir(&dir);
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let filename = format!("note-{}.md", timestamp);
-    let path = dir.join(&filename);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let title = title
         .map(|t| t.trim().trim_start_matches('#').trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "New Note".to_string());
     let initial = format!("# {title}\n\n");
-    fs::write(&path, &initial).map_err(|e| e.to_string())?;
+    let path = note_files::create_note(&dir, folder.as_deref().unwrap_or(""), &initial)?;
     mark_self_write(&self_writes, &path.to_string_lossy());
 
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
     index.set(&path.to_string_lossy(), &initial, mtime_ms(&meta));
     index.save();
-    let mtime = meta
-        .modified()
-        .map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        })
-        .unwrap_or(0);
-
-    Ok(NoteInfo {
-        id: filename.trim_end_matches(".md").to_string(),
-        path: path.to_string_lossy().to_string(),
-        title,
-        mtime,
-        pinned: false,
-    })
-}
-
-/// True if `path` is a note file directly inside `notes_dir`.
-fn is_note_path(path: &Path, notes_dir: &Path) -> bool {
-    path.parent() == Some(notes_dir) && path.extension().and_then(|e| e.to_str()) == Some("md")
+    note_info(&dir, &path, &index)
 }
 
 /// Move a note to the Trash, so a mistaken delete can be undone from Finder.
@@ -457,9 +456,7 @@ async fn delete_note(
     index: tauri::State<'_, NoteIndex>,
 ) -> Result<(), String> {
     // The path comes from the webview, so never trash anything but a note.
-    if !is_note_path(Path::new(&path), &get_notes_dir()) {
-        return Err(format!("Not a note: {path}"));
-    }
+    note_files::checked_note(&get_notes_dir(), Path::new(&path))?;
     let mut trash = trash::TrashContext::default();
     // The default macOS method asks Finder over AppleScript, which makes macOS
     // prompt for permission to control Finder. NSFileManager needs none.
@@ -488,9 +485,7 @@ fn open_notes_folder(app: tauri::AppHandle) -> Result<(), String> {
 /// Show a note selected in a Finder window.
 #[command]
 fn reveal_note(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    if !is_note_path(Path::new(&path), &get_notes_dir()) {
-        return Err(format!("Not a note: {path}"));
-    }
+    note_files::checked_note(&get_notes_dir(), Path::new(&path))?;
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| e.to_string())
@@ -617,6 +612,9 @@ pub fn run() {
             quit_app,
             get_default_notes_dir,
             list_notes,
+            list_folders,
+            create_folder,
+            move_note,
             read_note,
             write_note,
             create_note,
@@ -710,11 +708,11 @@ mod tests {
     }
 
     #[test]
-    fn only_markdown_files_directly_in_the_notes_dir_are_notes() {
+    fn markdown_files_in_nested_folders_are_notes() {
         let dir = Path::new("/notes");
         assert!(is_note_path(Path::new("/notes/a.md"), dir));
         assert!(!is_note_path(Path::new("/notes/a.txt"), dir));
-        assert!(!is_note_path(Path::new("/notes/sub/a.md"), dir));
+        assert!(is_note_path(Path::new("/notes/sub/a.md"), dir));
         assert!(!is_note_path(Path::new("/notes/../a.md"), dir));
         assert!(!is_note_path(Path::new("/elsewhere/a.md"), dir));
     }

@@ -29,10 +29,10 @@
   import { MermaidCodeBlock } from '$lib/code-block';
   import { TableExtensions } from '$lib/table';
   import CommandPalette, { type PaletteItem } from '$lib/CommandPalette.svelte';
+  import NoteBrowser from '$lib/NoteBrowser.svelte';
+  import FolderDialog from '$lib/FolderDialog.svelte';
+  import type { NoteInfo, FolderInfo } from '$lib/notes';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-
-  // State
-  type NoteInfo = { id: string; path: string; title: string; mtime: number; pinned: boolean };
 
   // The open note is `frontmatter + content`; the editor only edits `content`.
   let content = $state('');
@@ -40,6 +40,16 @@
   let currentPath = $state('');
   let noteTitle = $state('Plain Notes');
   let notes = $state<NoteInfo[]>([]);
+  let folders = $state<FolderInfo[]>([]);
+  let activeFolder = $state('');
+  let browserLoading = $state(true);
+  let browserError = $state('');
+  let folderDialog = $state<'create' | 'move' | null>(null);
+  let isMoving = $state(false);
+  let isCreating = false;
+  let missingNote = $state(false);
+  let saveQueue: Promise<boolean> = Promise.resolve(true);
+  let refreshVersion = 0;
   let showList = $state(false);
   let isLoadingNote = $state(false);
   // Live-sync: unsaved edits exist (isDirty), and the open note changed on disk
@@ -70,7 +80,8 @@
       .map((n) => ({
         id: n.path,
         label: n.title,
-        hint: n.pinned ? 'Pinned' : '',
+        hint: [n.folder || 'Notes', n.pinned ? 'Pinned' : ''].filter(Boolean).join(' · '),
+        searchText: `${n.title} ${n.folder}`,
         run: () => loadNote(n.path),
       }));
   });
@@ -79,6 +90,9 @@
 
   let paletteCommands = $derived<PaletteItem[]>([
     { id: 'new', label: 'New note', hint: '⌘N', run: () => createNewNote() },
+    { id: 'browse', label: 'Browse notes and folders', hint: '⌘P', run: toggleBrowser },
+    { id: 'new-folder', label: 'New folder', hint: activeFolder || 'Notes', run: () => openFolderDialog('create') },
+    { id: 'move-folder', label: 'Move note to folder', hint: 'Command', run: () => openFolderDialog('move') },
     { id: 'pin', label: pinned ? 'Unpin note' : 'Pin note', hint: 'Command', run: togglePin },
     { id: 'copy-md', label: 'Copy as markdown', hint: 'Command', run: () => copyNote('markdown') },
     { id: 'copy-text', label: 'Copy as plain text', hint: 'Command', run: () => copyNote('text') },
@@ -139,6 +153,14 @@
   let lastSavedContent = '';
 
   let taskItemClickHandler: ((event: MouseEvent) => void) | null = null;
+
+  function setEditorEditable(editable: boolean) {
+    // setEditable emits a content update by default, which would rewrite untouched Markdown.
+    editor?.setOptions({
+      editable,
+      editorProps: { attributes: { role: 'textbox', 'aria-readonly': String(!editable) } },
+    });
+  }
 
   function initEditor(initialContent: string) {
     if (editor) {
@@ -206,23 +228,13 @@
         ed.view.dom.addEventListener('click', taskItemClickHandler, { capture: true });
       },
       onUpdate: ({ editor: ed }) => {
-        if (isLoadingNote) {
-          isLoadingNote = false;
-          return;
-        }
-        currentEditorHtml = ed.getHTML();
-        setTimeout(() => {
-          if (editor && !isLoadingNote) {
-            content = htmlToSimpleMarkdown(currentEditorHtml);
-            onContentInput();
-          }
-        }, 0);
+        if (isLoadingNote || isMoving || missingNote) return;
+        content = htmlToSimpleMarkdown(ed.getHTML());
+        onContentInput();
       },
     });
     setTimeout(() => { try { editor?.commands.focus(); } catch {} }, 0);
   }
-
-  let currentEditorHtml = '';
 
   // Reliable drag support for frameless window on macOS
   function startWindowDrag(e: MouseEvent) {
@@ -238,60 +250,61 @@
   });
 
   async function loadNote(path: string) {
+    if (isMoving || isLoadingNote) return;
+    if (externalChangePending && isDirty) {
+      flash('Resolve the changes on disk before switching notes.', 5000);
+      return;
+    }
+    isLoadingNote = true;
+    setEditorEditable(false);
     try {
+      if (isDirty && !missingNote && !(await saveCurrent())) return;
       const text = (await invoke('read_note', { path })) as string;
       const parts = splitFrontmatter(text);
       frontmatter = parts.frontmatter;
       content = parts.body;
       lastSavedContent = text; // disk and memory now agree
       currentPath = path;
+      activeFolder = notes.find((note) => note.path === path)?.folder ?? '';
+      missingNote = false;
+      isDirty = false;
+      externalChangePending = false;
       recentPaths = [path, ...recentPaths.filter((p) => p !== path)];
       showList = false;
-      isLoadingNote = true;
-
-      const htmlContent = simpleMarkdownToHtml(text);
-
-      // Ensure we have a live editor mounted on the (persistent) element.
-      // Destroy previous if any (in case of prior element swap edge cases).
       if (editor) {
         editor.destroy();
         editor = null;
       }
 
       if (editorElement) {
-        initEditor(parts.body); // always fresh init on current element for reliability
-        // set explicit content (init already did, but ensure)
-        // init used the md->html path already
-      } else {
-        // element not bound yet (very early); defer a tick in caller if needed
-        // try init anyway on next paint via the post mount effect
+        initEditor(parts.body);
       }
-
-      // Focus the editor so caret is ready. Using plain focus() to avoid forcing
-      // the caret to the very end (which could make task items in the middle
-      // appear unreachable).
-      setTimeout(() => {
-        if (editor) {
-          try { editor.commands.focus(); } catch {}
-        }
-        isLoadingNote = false;
-      }, 10);
     } catch (e) {
       console.error(e);
+      flash(`Could not open note: ${String(e)}`, 5000);
+    } finally {
       isLoadingNote = false;
+      setEditorEditable(!missingNote);
     }
   }
 
-  async function saveCurrent() {
-    if (!currentPath || !content) return;
-    try {
-      const saved = frontmatter + content;
-      await invoke('write_note', { path: currentPath, content: saved });
-      lastSavedContent = saved;
-      isDirty = false;
-    } catch (e) {
-      console.error('save failed', e);
-    }
+  function saveCurrent(): Promise<boolean> {
+    if (!currentPath || missingNote || externalChangePending) return Promise.resolve(false);
+    const path = currentPath;
+    const saved = frontmatter + content;
+    saveQueue = saveQueue.then(async () => {
+      await invoke('write_note', { path, content: saved });
+      if (currentPath === path) {
+        lastSavedContent = saved;
+        isDirty = frontmatter + content !== saved;
+      }
+      return true;
+    }).catch((error) => {
+      console.error('save failed', error);
+      flash(`Could not save note: ${String(error)}`, 5000);
+      return false;
+    });
+    return saveQueue;
   }
 
   // Live-sync conflict resolution (shown only when the open note changed on disk
@@ -299,6 +312,8 @@
   async function reloadFromDisk() {
     externalChangePending = false;
     if (currentPath) {
+      await saveQueue;
+      isDirty = false;
       await loadNote(currentPath);
       isDirty = false;
     }
@@ -320,19 +335,61 @@
   }
 
   async function createNewNote(title?: string) {
+    if (isMoving || isLoadingNote || isCreating) return;
+    if (isDirty && !missingNote && !(await saveCurrent())) return;
+    isCreating = true;
     try {
-      const newNote = (await invoke('create_note', { title })) as NoteInfo;
+      const newNote = (await invoke('create_note', { title, folder: activeFolder })) as NoteInfo;
       await refreshNotes();
-      isLoadingNote = true;
       await loadNote(newNote.path);
     } catch (e) {
       console.error(e);
-      isLoadingNote = false;
+      flash(`Could not create note: ${String(e)}`, 5000);
+    } finally {
+      isCreating = false;
+    }
+  }
+
+  async function openFolderDialog(mode: 'create' | 'move') {
+    if (isMoving || isLoadingNote || (mode === 'move' && (!currentPath || missingNote))) return;
+    if (!(await refreshNotes())) {
+      showList = true;
+      return;
+    }
+    if (!isMoving && !isLoadingNote) folderDialog = mode;
+  }
+
+  async function submitFolder(value: string) {
+    if (isLoadingNote) throw new Error('Wait for the note to finish opening, then try again.');
+    if (folderDialog === 'create') {
+      await invoke('create_folder', { parent: activeFolder, name: value });
+      await refreshNotes();
+      flash('Folder created');
+      return;
+    }
+    if (!currentPath || missingNote) throw new Error('This note is no longer at its original location.');
+    if (externalChangePending) throw new Error('Resolve the changes on disk before moving this note.');
+    isMoving = true;
+    setEditorEditable(false);
+    try {
+      const saved = isDirty ? await saveCurrent() : await saveQueue;
+      if (!saved) throw new Error('Could not save your edits. Try again before moving the note.');
+      const previousPath = currentPath;
+      const moved = await invoke<NoteInfo>('move_note', { path: previousPath, folder: value });
+      currentPath = moved.path;
+      activeFolder = moved.folder;
+      recentPaths = recentPaths.map((path) => path === previousPath ? moved.path : path);
+      notes = notes.map((note) => note.path === previousPath ? moved : note);
+      await refreshNotes();
+      flash(`Moved to ${moved.folder || 'Notes'}`);
+    } finally {
+      isMoving = false;
+      setEditorEditable(!missingNote);
     }
   }
 
   async function togglePin() {
-    if (!currentPath) return;
+    if (!currentPath || isLoadingNote || isMoving || missingNote) return;
     frontmatter = setPinned(frontmatter, !pinned);
     await saveCurrent();
     await refreshNotes();
@@ -351,18 +408,25 @@
   }
 
   async function trashCurrentNote() {
+    if (isMoving || isLoadingNote || missingNote) return;
     const path = currentPath;
     if (!path) return;
+    isMoving = true;
+    setEditorEditable(false);
+    await saveQueue;
     currentPath = ''; // stop saves from writing the note back while it's trashed
     try {
       await invoke('delete_note', { path });
     } catch (e) {
       console.error('trash failed', e);
       currentPath = path;
+      isMoving = false;
+      setEditorEditable(true);
       flash('Could not move note to Trash');
       return;
     }
     recentPaths = recentPaths.filter((p) => p !== path);
+    isMoving = false;
     await refreshNotes();
     const next = recentPaths.find((p) => notes.some((n) => n.path === p)) ?? notes[0]?.path;
     if (next) await loadNote(next);
@@ -427,11 +491,26 @@
   }
 
   async function refreshNotes() {
+    const version = ++refreshVersion;
+    browserLoading = true;
     try {
-      notes = (await invoke('list_notes')) as NoteInfo[];
+      const [nextNotes, nextFolders] = await Promise.all([
+        invoke<NoteInfo[]>('list_notes'), invoke<FolderInfo[]>('list_folders'),
+      ]);
+      if (version !== refreshVersion) return true;
+      notes = nextNotes;
+      folders = nextFolders;
+      browserError = '';
+      while (activeFolder && !folders.some((folder) => folder.path === activeFolder)) {
+        activeFolder = activeFolder.includes('/') ? activeFolder.slice(0, activeFolder.lastIndexOf('/')) : '';
+      }
+      return true;
     } catch (e) {
       console.error(e);
-      notes = [];
+      if (version === refreshVersion) browserError = `Could not load notes and folders: ${String(e)}`;
+      return false;
+    } finally {
+      if (version === refreshVersion) browserLoading = false;
     }
   }
 
@@ -457,6 +536,7 @@
   }
 
   async function toggleBrowser() {
+    if (isMoving || isLoadingNote) return;
     showList = !showList;
     if (showList) await refreshNotes();
   }
@@ -464,11 +544,13 @@
   onMount(async () => {
     // Basic in-app shortcuts (Cmd/Ctrl + key)
     const handleKey = (e: KeyboardEvent) => {
+      if (folderDialog) return;
       const mod = e.metaKey || e.ctrlKey;
       // ESC closes the palette if open, otherwise fully quits the app
       if (e.key === 'Escape') {
         e.preventDefault();
         if (showPalette) closePalette();
+        else if (showList) { showList = false; editor?.commands.focus(); }
         else invoke('quit_app');
         return;
       }
@@ -498,7 +580,12 @@
     // refresh the list and reconcile the open note without losing unsaved edits.
     unlistenNotesChanged = await listen<{ paths: string[] }>('notes-changed', async (event) => {
       const changed = event.payload?.paths ?? [];
-      await refreshNotes();
+      if (!(await refreshNotes()) || isMoving) return;
+      if (currentPath && !notes.some((note) => note.path === currentPath)) {
+        missingNote = true;
+        setEditorEditable(false);
+        return;
+      }
       if (currentPath && !showList && changed.includes(currentPath)) {
         // Re-read the note and compare against what we already have. If disk
         // matches our in-memory content (or the last thing we saved), this event
@@ -521,9 +608,11 @@
     });
 
     // Bootstrap: load default notes + open/create one
-    await refreshNotes();
+    if (!(await refreshNotes())) {
+      showList = true;
+      return;
+    }
     if (notes.length > 0) {
-      isLoadingNote = true;
       await loadNote(notes[0].path);
     } else {
       await createNewNote();
@@ -571,22 +660,23 @@
 
   <!-- List (Browse) - only shown when active. Editor container is ALWAYS in DOM so bind:this + Tiptap instance survive toggles. -->
   {#if showList}
-    <div class="editor-container overflow-auto p-2">
+    <div class="editor-container browse-container">
+      <NoteBrowser
+        {notes} {folders} folder={activeFolder} loading={browserLoading || isLoadingNote} error={browserError}
+        onFolder={(path) => { activeFolder = path; }} onOpen={loadNote}
+        onNewFolder={() => openFolderDialog('create')} onNewNote={() => createNewNote()} onRetry={refreshNotes}
+      />
       <div class="connect-bar">
         <button class="connect-btn" onclick={connectToClaude}>Connect to Claude</button>
         {#if connectStatus}<span class="connect-status">{connectStatus}</span>{/if}
       </div>
-      {#each notes as n}
-        <button 
-          class="w-full text-left px-3 py-1.5 rounded hover:bg-black/5 dark:hover:bg-white/10 mb-0.5 flex justify-between text-sm"
-          onclick={() => loadNote(n.path)}>
-          <span class="truncate">{n.title}</span>
-          {#if n.pinned}<span class="text-[10px] opacity-50">📌</span>{/if}
-        </button>
-      {/each}
-      {#if notes.length === 0}
-        <div class="opacity-50 p-4 text-sm">No notes yet. Create one.</div>
-      {/if}
+    </div>
+  {/if}
+
+  {#if missingNote && !showList}
+    <div class="external-change-banner" role="status">
+      <span>This note was moved or removed. You can still copy its text.</span>
+      <button onclick={() => copyNote('markdown')}>Copy text</button>
     </div>
   {/if}
 
@@ -605,10 +695,22 @@
   </div>
 
   <div class="statusbar">
-    <span class="charcount">
+    <button class="navigation-button" onclick={toggleBrowser} disabled={isMoving || isLoadingNote || (showList && !currentPath)} title="Browse notes and folders (⌘P)">
+      {showList ? 'Back to note' : 'Browse notes'}
+    </button>
+    <span class="charcount" class:status-flash={!!statusMessage} role="status" title={statusMessage}>
       {statusMessage || `${charCount} ${charCount === 1 ? 'character' : 'characters'}`}
     </span>
+    {#if !showList && currentPath}
+      <button class="navigation-button" onclick={() => openFolderDialog('move')} disabled={isMoving || isLoadingNote || missingNote}>Move note</button>
+    {/if}
   </div>
+
+  {#if folderDialog}
+    <FolderDialog mode={folderDialog} {folders}
+      folder={folderDialog === 'create' ? activeFolder : notes.find((note) => note.path === currentPath)?.folder ?? ''}
+      onSubmit={submitFolder} onClose={() => { folderDialog = null; }} />
+  {/if}
 
   {#if showPalette}
     <CommandPalette
@@ -622,6 +724,14 @@
 
 <style>
 /* All styles in src/app.css (Tailwind + custom .note-window etc.) */
+.browse-container { padding: 4px 16px 16px; }
+.statusbar { gap: 6px; padding: 2px 12px; }
+.charcount { flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-flash { color: var(--rc-text); }
+.navigation-button { flex-shrink: 0; min-height: 44px; padding: 4px 6px; font-size: 11px; border-radius: 6px; cursor: pointer; }
+.navigation-button:hover { background: var(--rc-fill); }
+.navigation-button:disabled { opacity: 0.5; cursor: default; }
+.navigation-button:focus-visible, .connect-btn:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .external-change-banner {
   display: flex;
   align-items: center;
@@ -645,9 +755,10 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 2px 4px 8px;
+  padding: 16px 4px 8px;
 }
 .connect-btn {
+  min-height: 44px;
   font-size: 12px;
   padding: 3px 10px;
   border-radius: 6px;

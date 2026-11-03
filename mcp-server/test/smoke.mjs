@@ -37,15 +37,18 @@ try {
   // tools/list
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  check("lists 6 tools", names.length === 6, JSON.stringify(names));
+  check("lists 9 tools", names.length === 9, JSON.stringify(names));
   check(
     "expected tool names",
     JSON.stringify(names) ===
       JSON.stringify([
+        "create_folder",
         "create_note",
         "delete_note",
         "edit_note",
+        "list_folders",
         "list_notes",
+        "move_note",
         "read_note",
         "search_notes",
       ]),
@@ -120,6 +123,73 @@ try {
   check("pinned frontmatter parsed", pinnedEntry?.pinned === true);
   check("pinned title parsed", pinnedEntry?.title === "Important");
 
+  const folder = await client.callTool({ name: "create_folder", arguments: { name: "Work" } });
+  check("creates root folder", folder.structuredContent?.path === "Work", textOf(folder));
+  const nestedFolder = await client.callTool({
+    name: "create_folder", arguments: { parent: "Work", name: "Project A" },
+  });
+  check("creates nested folder", nestedFolder.structuredContent?.path === "Work/Project A");
+  const duplicateFolder = await client.callTool({ name: "create_folder", arguments: { name: "Work" } });
+  check("duplicate folder errors", duplicateFolder.isError === true);
+  const folderList = await client.callTool({ name: "list_folders", arguments: {} });
+  check("lists empty nested folders", folderList.structuredContent?.folders?.some((f) => f.path === "Work/Project A"));
+
+  const nested = await client.callTool({
+    name: "create_note", arguments: { folder: "Work/Project A", title: "Nested", content: "domain-specific text" },
+  });
+  const nestedId = nested.structuredContent?.id;
+  check("creates note in selected folder", typeof nestedId === "string" && nestedId.startsWith("Work/Project A/note-"));
+  check("returns note folder", nested.structuredContent?.folder === "Work/Project A");
+  if (nestedId) {
+    const nestedRead = await client.callTool({ name: "read_note", arguments: { id: nestedId } });
+    check("reads nested note", textOf(nestedRead).includes("domain-specific text"));
+    await client.callTool({ name: "edit_note", arguments: { id: nestedId, mode: "append", content: "more detail" } });
+    const nestedSearch = await client.callTool({ name: "search_notes", arguments: { query: "more detail" } });
+    check("search finds edited nested note", nestedSearch.structuredContent?.results?.some((r) => r.id === nestedId));
+    const nestedDelete = await client.callTool({ name: "delete_note", arguments: { id: nestedId } });
+    check("deletes nested note", nestedDelete.isError !== true && !fs.existsSync(path.join(tmp, `${nestedId}.md`)));
+  }
+
+  fs.mkdirSync(path.join(tmp, "Work/Project A"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "same.md"), "# Root duplicate");
+  fs.writeFileSync(path.join(tmp, "Work/Project A/same.md"), "# Nested duplicate");
+  const duplicates = await client.callTool({ name: "list_notes", arguments: {} });
+  const duplicateIds = (duplicates.structuredContent?.notes ?? []).map((n) => n.id);
+  check("duplicate filenames have distinct IDs", duplicateIds.includes("same") && duplicateIds.includes("Work/Project A/same"));
+  const collision = await client.callTool({ name: "move_note", arguments: { id: "same", folder: "Work/Project A" } });
+  check("move refuses collision", collision.isError === true);
+  check("collision preserves both contents", fs.readFileSync(path.join(tmp, "same.md"), "utf8") === "# Root duplicate"
+    && fs.readFileSync(path.join(tmp, "Work/Project A/same.md"), "utf8") === "# Nested duplicate");
+
+  const moveContent = "---\npinned: true\n---\n# Move me\n\nExact bytes\n";
+  fs.writeFileSync(path.join(tmp, "movable.md"), moveContent);
+  const moved = await client.callTool({ name: "move_note", arguments: { id: "movable", folder: "Work/Project A" } });
+  check("move returns new ID", moved.structuredContent?.id === "Work/Project A/movable", textOf(moved));
+  check("move retains pin", moved.structuredContent?.pinned === true);
+  check("move removes old path", !fs.existsSync(path.join(tmp, "movable.md")));
+  if (moved.structuredContent?.id) {
+    check("move preserves exact bytes", fs.readFileSync(path.join(tmp, "Work/Project A/movable.md"), "utf8") === moveContent);
+    const sameFolder = await client.callTool({ name: "move_note", arguments: { id: "Work/Project A/movable", folder: "Work/Project A" } });
+    check("move to current folder is harmless", sameFolder.isError !== true);
+    const movedBack = await client.callTool({ name: "move_note", arguments: { id: "Work/Project A/movable", folder: "" } });
+    check("move to root works", movedBack.structuredContent?.id === "movable");
+  }
+  for (const badFolder of ["../escape", "/outside", "Work/../Other", "Work\\Other", "Missing"]) {
+    const bad = await client.callTool({ name: "create_note", arguments: { folder: badFolder } });
+    check(`rejects folder ${JSON.stringify(badFolder)}`, bad.isError === true);
+  }
+  const invalidName = await client.callTool({ name: "create_folder", arguments: { name: "../escape" } });
+  check("rejects invalid folder name", invalidName.isError === true);
+
+  fs.symlinkSync(tmp, path.join(tmp, "loop"));
+  fs.symlinkSync(path.join(tmp, "same.md"), path.join(tmp, "linked.md"));
+  const linkedRead = await client.callTool({ name: "read_note", arguments: { id: "linked" } });
+  check("refuses linked notes", linkedRead.isError === true);
+  const linkedCreate = await client.callTool({ name: "create_note", arguments: { folder: "loop" } });
+  check("refuses linked folders", linkedCreate.isError === true);
+  const withoutLinks = await client.callTool({ name: "list_notes", arguments: {} });
+  check("listing ignores links", !(withoutLinks.structuredContent?.notes ?? []).some((n) => n.id === "linked" || n.id.startsWith("loop/")));
+
   // path-safety: traversal ids must be rejected (isError), nothing read outside dir
   for (const badId of ["../secret", "../../etc/passwd", "note/../../x", ".."]) {
     const bad = await client.callTool({ name: "read_note", arguments: { id: badId } });
@@ -143,6 +213,19 @@ try {
   check("delete missing errors", delMissing.isError === true);
   const delTraversal = await client.callTool({ name: "delete_note", arguments: { id: "../secret" } });
   check("delete rejects traversal id", delTraversal.isError === true, textOf(delTraversal));
+
+  if (process.platform !== "win32") {
+    fs.mkdirSync(path.join(tmp, "Project: A"));
+    fs.writeFileSync(path.join(tmp, "Project: A/Notes & questions?.md"), "# External filename");
+    const externalFolders = await client.callTool({ name: "list_folders", arguments: {} });
+    check("lists existing folder names with punctuation", externalFolders.structuredContent?.folders?.some((f) => f.path === "Project: A"));
+    const externalNotes = await client.callTool({ name: "list_notes", arguments: {} });
+    check("existing folder names do not interrupt listing", externalNotes.structuredContent?.notes?.some((n) => n.id === "Project: A/Notes & questions?"));
+    const externalRead = await client.callTool({ name: "read_note", arguments: { id: "Project: A/Notes & questions?" } });
+    check("reads existing filenames with punctuation", textOf(externalRead).includes("# External filename"));
+    const externalMove = await client.callTool({ name: "move_note", arguments: { id: "same", folder: "Project: A" } });
+    check("moves into existing folder names with punctuation", externalMove.structuredContent?.id === "Project: A/same");
+  }
 } catch (e) {
   failures += 1;
   console.error("FATAL", e);

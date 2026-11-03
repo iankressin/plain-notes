@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { ensureDir, noteIdToPath } from "./notes-dir";
+import { ensureDir, noteIdToPath, folderToPath, validSegment } from "./notes-dir";
 
 // `type` (not `interface`) so these are assignable to the SDK's
 // structuredContent type, which requires an index signature.
 export type NoteMeta = {
   id: string;
+  folder: string;
   title: string;
   mtime: number; // unix seconds, matches the Rust backend
   pinned: boolean;
@@ -23,6 +24,63 @@ export type SearchResult = {
 };
 
 export type EditMode = "replace" | "append" | "str_replace";
+
+export type FolderInfo = { path: string; name: string };
+
+function folderOf(id: string): string {
+  return id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "";
+}
+
+async function scan(notesDir: string): Promise<{ ids: string[]; folders: FolderInfo[] }> {
+  ensureDir(notesDir);
+  const ids: string[] = [];
+  const folders: FolderInfo[] = [];
+  const pending = [""];
+  while (pending.length) {
+    const folder = pending.pop()!;
+    const entries = await fs.readdir(folderToPath(notesDir, folder), { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = folder ? `${folder}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        folders.push({ path: relative, name: entry.name });
+        pending.push(relative);
+      } else if (entry.isFile() && entry.name.endsWith(".md")) {
+        ids.push(stripMdExt(relative));
+      }
+    }
+  }
+  folders.sort((a, b) => a.path.localeCompare(b.path));
+  return { ids, folders };
+}
+
+export async function listFolders(notesDir: string): Promise<FolderInfo[]> {
+  return (await scan(notesDir)).folders;
+}
+
+export async function createFolder(notesDir: string, parent: string, name: string): Promise<FolderInfo> {
+  ensureDir(notesDir);
+  name = name.trim();
+  if (!validSegment(name) || /[:*?"<>|]/.test(name)) throw new Error("Enter a folder name without slashes or reserved characters");
+  await fs.mkdir(path.join(folderToPath(notesDir, parent), name));
+  return { path: parent ? `${parent}/${name}` : name, name };
+}
+
+export async function moveNote(notesDir: string, id: string, folder: string): Promise<NoteMeta> {
+  const source = noteIdToPath(notesDir, id);
+  const target = path.join(folderToPath(notesDir, folder), path.basename(source));
+  const nextId = folder ? `${folder}/${stripMdExt(path.basename(source))}` : stripMdExt(path.basename(source));
+  if (source !== target) {
+    await fs.link(source, target);
+    try {
+      await fs.unlink(source);
+    } catch (error) {
+      await fs.unlink(target).catch(() => {});
+      throw error;
+    }
+  }
+  const { content: _, ...meta } = await readNote(notesDir, nextId);
+  return meta;
+}
 
 function stripMdExt(name: string): string {
   return name.endsWith(".md") ? name.slice(0, -3) : name;
@@ -57,25 +115,18 @@ export function parseTitleAndPinned(content: string): { title: string; pinned: b
 }
 
 export async function listNotes(notesDir: string): Promise<NoteMeta[]> {
-  ensureDir(notesDir);
-  let entries: string[];
-  try {
-    entries = await fs.readdir(notesDir);
-  } catch {
-    return [];
-  }
-
+  const { ids } = await scan(notesDir);
   const notes: NoteMeta[] = [];
-  for (const name of entries) {
-    if (!name.endsWith(".md")) continue;
-    const full = path.join(notesDir, name);
+  for (const id of ids) {
     try {
+      const full = noteIdToPath(notesDir, id);
       const stat = await fs.stat(full);
       if (!stat.isFile()) continue;
       const content = await fs.readFile(full, "utf8");
       const { title, pinned } = parseTitleAndPinned(content);
       notes.push({
-        id: stripMdExt(name),
+        id,
+        folder: folderOf(id),
         title,
         mtime: Math.floor(stat.mtimeMs / 1000),
         pinned,
@@ -99,14 +150,16 @@ export async function readNote(notesDir: string, id: string): Promise<NoteFull> 
   const content = await fs.readFile(file, "utf8"); // throws ENOENT if missing
   const stat = await fs.stat(file);
   const { title, pinned } = parseTitleAndPinned(content);
-  return { id: stripMdExt(id), title, pinned, mtime: Math.floor(stat.mtimeMs / 1000), content };
+  return { id: stripMdExt(id), folder: folderOf(id), title, pinned, mtime: Math.floor(stat.mtimeMs / 1000), content };
 }
 
 export async function createNote(
   notesDir: string,
-  opts: { title?: string; content?: string },
+  opts: { title?: string; content?: string; folder?: string },
 ): Promise<NoteMeta> {
   ensureDir(notesDir);
+  const folder = opts.folder ?? "";
+  const dir = folderToPath(notesDir, folder);
   const epoch = Math.floor(Date.now() / 1000);
 
   let body: string;
@@ -118,12 +171,11 @@ export async function createNote(
     body = "# New Note\n\n"; // exact template used by the Rust create_note
   }
 
-  // Collision-safe: exclusive create, suffixing -1/-2/... on EEXIST. (Fixes a
-  // same-second overwrite race present in the Rust create_note.)
+  // Exclusive creation preserves notes created in the same second.
   let id = `note-${epoch}`;
   let suffix = 0;
   for (;;) {
-    const file = path.join(notesDir, `${id}.md`);
+    const file = path.join(dir, `${id}.md`);
     try {
       await fs.writeFile(file, body, { flag: "wx" });
       break;
@@ -138,7 +190,7 @@ export async function createNote(
   }
 
   const { title, pinned } = parseTitleAndPinned(body);
-  return { id, title, pinned, mtime: epoch };
+  return { id: folder ? `${folder}/${id}` : id, folder, title, pinned, mtime: epoch };
 }
 
 export async function editNote(

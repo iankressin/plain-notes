@@ -2,10 +2,28 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-// Note ids are filenames without the `.md` extension. We only ever accept ids
-// (never raw paths) from clients, and confine every resolved path to the notes
-// directory. This is the security boundary for the whole server.
-const ID_RE = /^[A-Za-z0-9._-]+$/;
+export function validSegment(value: string): boolean {
+  return value.length > 0 && value !== "." && value !== ".." && !/[\x00-\x1f\x7f/\\]/.test(value);
+}
+
+function checkedPath(notesDir: string, relative: string): string {
+  const parts = relative === "" ? [] : relative.split("/");
+  if (!parts.every(validSegment)) throw new Error("Invalid notes location");
+  let resolved = path.resolve(notesDir);
+  for (const part of parts) {
+    resolved = path.join(resolved, part);
+    if (fs.lstatSync(resolved).isSymbolicLink()) {
+      throw new Error("Symbolic links cannot be used as notes locations");
+    }
+  }
+  return resolved;
+}
+
+export function folderToPath(notesDir: string, folder: string): string {
+  const resolved = checkedPath(notesDir, folder);
+  if (!fs.statSync(resolved).isDirectory()) throw new Error("Folder does not exist");
+  return resolved;
+}
 
 /**
  * Resolve the notes directory.
@@ -45,14 +63,10 @@ export function ensureDir(dir: string): void {
 /** Resolve a client-supplied note id to an absolute path, confined to notesDir. */
 export function noteIdToPath(notesDir: string, id: string): string {
   const bare = id.endsWith(".md") ? id.slice(0, -3) : id;
-  if (!ID_RE.test(bare) || bare === "." || bare === "..") {
+  if (!bare || !bare.split("/").every(validSegment)) {
     throw new Error(`Invalid note id: ${JSON.stringify(id)}`);
   }
-  const resolved = path.resolve(notesDir, `${bare}.md`);
-  // Defense in depth: even if the regex is somehow bypassed, never escape notesDir.
-  const rel = path.relative(notesDir, resolved);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error("Path escapes notes directory");
-  }
+  const resolved = checkedPath(notesDir, `${bare}.md`);
+  if (!fs.statSync(resolved).isFile()) throw new Error("Note does not exist");
   return resolved;
 }

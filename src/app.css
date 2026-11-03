@@ -337,5 +337,10 @@ body {
 
 .palette-hint {
   @apply text-xs shrink-0;
-  color: var(--rc-dim);
+  color: var(--rc-text);
+  opacity: 0.75;
+  max-width: 45%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
